@@ -26,6 +26,7 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 | `get_project_people` | Detailed people view for a project: PMC members, committers, and counts |
 | `search_people` | Find committers by Apache ID or name |
 | `get_person` | Full detail on a person: groups, PMC memberships, member status |
+| `find_projects_by_person` | Reverse people lookup: project involvement grouped by PMC memberships and committer groups |
 | `list_podlings` | Current incubating projects |
 | `get_releases` | Release history for a project |
 | `get_group_members` | List members of an LDAP group (committer or PMC) |

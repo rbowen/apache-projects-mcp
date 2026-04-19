@@ -205,6 +205,48 @@ function addMemberSection(lines, title, members) {
   }
 }
 
+function findProjectByGroupBase(committees, podlings, groupBase) {
+  const key = groupBase.toLowerCase();
+  const committee = committees.find(
+    (c) => c.id === key || c.group === key
+  );
+  if (committee) {
+    return {
+      type: "committee",
+      id: committee.id,
+      name: committee.name,
+      homepage: committee.homepage || "",
+    };
+  }
+
+  const podling = podlings[key];
+  if (podling) {
+    return {
+      type: "podling",
+      id: key,
+      name: podling.name || key,
+      homepage: podling.homepage || "",
+    };
+  }
+
+  return {
+    type: "group",
+    id: key,
+    name: key,
+    homepage: "",
+  };
+}
+
+function formatPersonProjectRole(groupName, project) {
+  const typeLabel = project.type === "committee"
+    ? "TLP"
+    : project.type === "podling"
+      ? "Podling"
+      : "LDAP group";
+  const homepage = project.homepage ? ` | ${project.homepage}` : "";
+  return `- **${project.name}** (${project.id}) [${typeLabel}] — group: ${groupName}${homepage}`;
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -510,6 +552,86 @@ server.tool(
     lines.push("");
     lines.push(`## PMC Memberships (${pmcGroups.length})`);
     lines.push(pmcGroups.map((g) => g.replace("-pmc", "")).join(", ") || "None");
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// --- Tool: find_projects_by_person -----------------------------------------
+server.tool(
+  "find_projects_by_person",
+  "Find where an ASF person is involved across projects. Returns PMC " +
+    "memberships and committer groups, grouped clearly by role.",
+  {
+    id: z.string().describe("Apache ID (e.g. 'rbowen', 'jmclean')"),
+  },
+  async ({ id }) => {
+    const committees = await getData("committees");
+    const podlings = await getData("podlings");
+    const groups = await getData("groups");
+    const people = await getData("people");
+    const names = await getData("people_name");
+    const uid = id.toLowerCase();
+
+    const person = people[uid];
+    const personGroups = Object.entries(groups)
+      .filter(([, members]) => (members || []).includes(uid))
+      .map(([group]) => group);
+    if (!person && !names[uid] && personGroups.length === 0) {
+      const lower = uid.toLowerCase();
+      const suggestions = Object.entries(names)
+        .filter(
+          ([candidateUid, name]) =>
+            candidateUid.toLowerCase().includes(lower) ||
+            (name || "").toLowerCase().includes(lower)
+        )
+        .slice(0, 10)
+        .map(([candidateUid, name]) => `${name} (${candidateUid})`);
+
+      const suggestionText = suggestions.length > 0
+        ? ` Similar people: ${suggestions.join(", ")}.`
+        : "";
+      return {
+        content: [{ type: "text", text: `Person "${id}" not found.${suggestionText}` }],
+      };
+    }
+
+    const name = names[uid] || person?.name || uid;
+    const pmcGroups = personGroups
+      .filter((group) => group.endsWith("-pmc"))
+      .sort((a, b) => a.localeCompare(b));
+    const committerGroups = personGroups
+      .filter((group) => !group.endsWith("-pmc"))
+      .sort((a, b) => a.localeCompare(b));
+
+    const lines = [];
+    lines.push(`# Project involvement for ${name} (${uid})`);
+    lines.push("");
+    lines.push(`- **ASF Member:** ${person?.member ? "Yes" : "No"}`);
+    lines.push(`- **PMC memberships:** ${pmcGroups.length}`);
+    lines.push(`- **Committer groups:** ${committerGroups.length}`);
+    lines.push("");
+    lines.push(`## PMC Memberships (${pmcGroups.length})`);
+    if (pmcGroups.length === 0) {
+      lines.push("None found.");
+    } else {
+      for (const group of pmcGroups) {
+        const groupBase = group.replace(/-pmc$/, "");
+        const project = findProjectByGroupBase(committees, podlings, groupBase);
+        lines.push(formatPersonProjectRole(group, project));
+      }
+    }
+
+    lines.push("");
+    lines.push(`## Committer Groups (${committerGroups.length})`);
+    if (committerGroups.length === 0) {
+      lines.push("None found.");
+    } else {
+      for (const group of committerGroups) {
+        const project = findProjectByGroupBase(committees, podlings, group);
+        lines.push(formatPersonProjectRole(group, project));
+      }
+    }
 
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
