@@ -19,6 +19,7 @@ const DATA_SOURCES = {
   people_name:  `${BASE_URL}/foundation/people_name.json`,
   releases:     `${BASE_URL}/foundation/releases.json`,
   groups:       `${BASE_URL}/foundation/groups.json`,
+  ldap_projects: "https://whimsy.apache.org/public/public_ldap_projects.json",
   podlings:     `${BASE_URL}/foundation/podlings.json`,
   repositories: `${BASE_URL}/foundation/repositories.json`,
 };
@@ -68,6 +69,27 @@ function truncateList(items, max = 50) {
   return { items: items.slice(0, max), truncated: true, total: items.length };
 }
 
+function isPmcGroupName(group) {
+  return group.endsWith("-pmc") || group.endsWith("-ppmc");
+}
+
+function getPmcGroupBase(group) {
+  return group.replace(/-p?pmc$/, "");
+}
+
+function getLdapProjects(data) {
+  return data.projects || data;
+}
+
+function formatMembers(members, names) {
+  return (members || [])
+    .map((uid) => ({
+      uid,
+      name: names[uid] || uid,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -80,7 +102,7 @@ const server = new McpServer({
 // --- Tool: list_committees --------------------------------------------------
 server.tool(
   "list_committees",
-  "List Apache project committees (PMCs). Optionally filter by name or keyword. " +
+  "List Apache project committees (PMCs) and podlings. Optionally filter by name or keyword. " +
     "Returns committee ID, name, short description, chair, and established date.",
   {
     query: z.string().optional().describe(
@@ -90,11 +112,24 @@ server.tool(
   },
   async ({ query, limit }) => {
     const committees = await getData("committees");
+    const podlings = await getData("podlings");
     const max = limit || 50;
 
-    let results = committees;
+    let results = [
+      ...committees.map((c) => ({ ...c, type: "PMC" })),
+      ...Object.entries(podlings).map(([id, p]) => ({
+        id,
+        name: p.name || id,
+        shortdesc: p.description || "",
+        chair: "N/A",
+        established: p.started || "unknown",
+        homepage: p.homepage || "",
+        charter: "",
+        type: "Podling",
+      })),
+    ];
     if (query) {
-      results = committees.filter(
+      results = results.filter(
         (c) =>
           matchesQuery(c.name || "", query) ||
           matchesQuery(c.shortdesc || "", query) ||
@@ -108,13 +143,13 @@ server.tool(
     if (query) {
       lines.push(`## Committees matching "${query}" (${results.length} found)`);
     } else {
-      lines.push(`## Apache Committees (${committees.length} total)`);
+      lines.push(`## Apache Committees (${results.length} total)`);
     }
     lines.push("");
 
     for (const c of items) {
       lines.push(
-        `- **${c.name}** (${c.id}) — ${c.shortdesc || "no description"}`
+        `- **${c.name}** (${c.id}) [${c.type}] — ${c.shortdesc || "no description"}`
       );
       lines.push(`  Chair: ${c.chair} | Est: ${c.established} | ${c.homepage || ""}`);
     }
@@ -139,11 +174,39 @@ server.tool(
   },
   async ({ id }) => {
     const committees = await getData("committees");
+    const podlings = await getData("podlings");
     const c = committees.find(
       (x) => x.id === id.toLowerCase() || x.group === id.toLowerCase()
     );
 
     if (!c) {
+      const key = id.toLowerCase();
+      const podlingEntry = Object.entries(podlings).find(
+        ([podlingId, p]) =>
+          podlingId.toLowerCase() === key ||
+          (p.name || "").toLowerCase() === key
+      );
+      if (podlingEntry) {
+        const [podlingId, p] = podlingEntry;
+        const ldapProjects = getLdapProjects(await getData("ldap_projects"));
+        const names = await getData("people_name");
+        const owners = formatMembers(ldapProjects[podlingId]?.owners, names);
+        const lines = [];
+        lines.push(`# ${p.name || podlingId}`);
+        lines.push(`ID: ${podlingId}`);
+        lines.push("Type: Podling");
+        lines.push(`Started: ${p.started || "unknown"}`);
+        lines.push(`Homepage: ${p.homepage || "N/A"}`);
+        lines.push(`Short description: ${p.description || "N/A"}`);
+        lines.push("");
+        lines.push(`## PPMC Roster (${owners.length} members)`);
+        for (const member of owners) {
+          lines.push(`- ${member.name} (${member.uid})`);
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
       return {
         content: [{ type: "text", text: `Committee "${id}" not found.` }],
       };
@@ -362,13 +425,27 @@ server.tool(
   },
   async ({ group }) => {
     const groups = await getData("groups");
+    const ldapProjectsData = await getData("ldap_projects");
+    const ldapProjects = getLdapProjects(ldapProjectsData);
     const names = await getData("people_name");
     const key = group.toLowerCase();
 
-    const members = groups[key];
+    const isOwnerRequest = isPmcGroupName(key);
+    const projectKey = isOwnerRequest ? getPmcGroupBase(key) : key;
+    const ldapProject = ldapProjects[projectKey];
+    let members = ldapProject
+      ? (isOwnerRequest ? ldapProject.owners : ldapProject.members)
+      : groups[key];
+    const resolvedKey = ldapProject ? projectKey : key;
+
     if (!members) {
       // Try to suggest
-      const matches = Object.keys(groups).filter((k) => k.includes(key));
+      const matches = [
+        ...new Set([
+          ...Object.keys(ldapProjects).filter((k) => k.includes(projectKey)),
+          ...Object.keys(groups).filter((k) => k.includes(key)),
+        ]),
+      ];
       if (matches.length > 0) {
         return {
           content: [
@@ -385,7 +462,7 @@ server.tool(
     }
 
     const lines = [];
-    lines.push(`## Group: ${key} (${members.length} members)`);
+    lines.push(`## Group: ${resolvedKey} (${members.length} members)`);
     lines.push("");
 
     const enriched = members.map((uid) => ({

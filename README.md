@@ -1,10 +1,10 @@
 # apache-projects-mcp
 
-MCP server for querying Apache Software Foundation project data from [projects.apache.org/json/](https://projects.apache.org/json/).
+MCP server for querying Apache Software Foundation project data from [projects.apache.org/json/](https://projects.apache.org/json/) and [Whimsy public JSON](https://whimsy.apache.org/public/).
 
 ## Data Sources
 
-All data is fetched from `https://projects.apache.org/json/foundation/` and cached for 6 hours:
+Data is fetched from `https://projects.apache.org/json/foundation/` and `https://whimsy.apache.org/public/`, then cached for 6 hours:
 
 | File | Description |
 |------|-------------|
@@ -12,6 +12,7 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 | `people.json` | All ASF committers — groups, member status |
 | `people_name.json` | Apache ID → full name mapping |
 | `groups.json` | LDAP groups — committer and PMC membership lists |
+| `public_ldap_projects.json` | Whimsy LDAP project entries — `members` for committers and `owners` for PMC/PPMC members |
 | `podlings.json` | Current Incubator podlings |
 | `releases.json` | Release history per project |
 | `repositories.json` | Source code repository URLs |
@@ -20,8 +21,8 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 
 | Tool | Description |
 |------|-------------|
-| `list_committees` | Browse/search PMCs by name, description, or charter |
-| `get_committee` | Full PMC detail: roster, chair, charter, homepage |
+| `list_committees` | Browse/search PMCs and podlings by name, description, or charter |
+| `get_committee` | Full PMC or podling detail: roster, chair, charter, homepage |
 | `search_people` | Find committers by Apache ID or name |
 | `get_person` | Full detail on a person: groups, PMC memberships, member status |
 | `list_podlings` | Current incubating projects |
