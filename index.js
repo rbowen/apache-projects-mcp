@@ -2,6 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
 const BASE_URL = "https://projects.apache.org/json";
@@ -68,6 +69,19 @@ function truncateList(items, max = 50) {
   return { items: items.slice(0, max), truncated: true, total: items.length };
 }
 
+function makeResponse(text, structuredContent) {
+  return {
+    content: [{ type: "text", text }],
+    structuredContent,
+  };
+}
+
+function makeTextResponse(text) {
+  return {
+    content: [{ type: "text", text }],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -123,7 +137,20 @@ server.tool(
       lines.push(`\n... showing ${max} of ${total} results. Use a query to narrow down.`);
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      query: query || null,
+      count: results.length,
+      shown: items.length,
+      truncated: !!truncated,
+      committees: items.map((c) => ({
+        id: c.id,
+        name: c.name,
+        shortdesc: c.shortdesc || null,
+        chair: c.chair || null,
+        established: c.established || null,
+        homepage: c.homepage || null,
+      })),
+    });
   }
 );
 
@@ -144,9 +171,7 @@ server.tool(
     );
 
     if (!c) {
-      return {
-        content: [{ type: "text", text: `Committee "${id}" not found.` }],
-      };
+      return makeTextResponse(`Committee "${id}" not found.`);
     }
 
     const lines = [];
@@ -162,16 +187,34 @@ server.tool(
     lines.push(c.charter || "No charter available.");
     lines.push("");
 
+    let roster = [];
     if (c.roster) {
       const members = Object.entries(c.roster);
-      lines.push(`## PMC Roster (${members.length} members)`);
       members.sort((a, b) => a[1].name.localeCompare(b[1].name));
-      for (const [uid, info] of members) {
-        lines.push(`- ${info.name} (${uid}) — joined ${info.date || "unknown"}`);
+      roster = members.map(([uid, info]) => ({
+        id: uid,
+        name: info.name || uid,
+        joined: info.date || null,
+      }));
+
+      lines.push(`## PMC Roster (${members.length} members)`);
+      for (const member of roster) {
+        lines.push(`- ${member.name} (${member.id}) — joined ${member.joined || "unknown"}`);
       }
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      id: c.id,
+      name: c.name,
+      group: c.group || null,
+      chair: c.chair || null,
+      established: c.established || null,
+      homepage: c.homepage || null,
+      reporting: c.reporting || null,
+      shortdesc: c.shortdesc || null,
+      charter: c.charter || null,
+      roster,
+    });
   }
 );
 
@@ -215,7 +258,18 @@ server.tool(
       lines.push(`\n... showing ${max} of ${total} results.`);
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      query,
+      count: matches.length,
+      shown: items.length,
+      truncated: !!truncated,
+      people: items.map((p) => ({
+        id: p.uid,
+        name: p.name,
+        member: !!p.member,
+        groups: p.groups || [],
+      })),
+    });
   }
 );
 
@@ -231,20 +285,17 @@ server.tool(
     const people = await getData("people");
     const names = await getData("people_name");
     const uid = id.toLowerCase();
-
     const person = people[uid];
+
     if (!person) {
-      return {
-        content: [{ type: "text", text: `Person "${id}" not found.` }],
-      };
+      return makeTextResponse(`Person "${id}" not found.`);
     }
 
     const name = names[uid] || person.name || uid;
     const groups = person.groups || [];
-
-    // Separate committer groups from PMC groups
     const pmcGroups = groups.filter((g) => g.endsWith("-pmc"));
     const committerGroups = groups.filter((g) => !g.endsWith("-pmc"));
+    const pmcs = pmcGroups.map((g) => g.replace("-pmc", ""));
 
     const lines = [];
     lines.push(`# ${name} (${uid})`);
@@ -254,9 +305,17 @@ server.tool(
     lines.push(committerGroups.join(", ") || "None");
     lines.push("");
     lines.push(`## PMC Memberships (${pmcGroups.length})`);
-    lines.push(pmcGroups.map((g) => g.replace("-pmc", "")).join(", ") || "None");
+    lines.push(pmcs.join(", ") || "None");
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      id: uid,
+      name,
+      member: !!person.member,
+      groups,
+      committerGroups,
+      pmcGroups,
+      pmcs,
+    });
   }
 );
 
@@ -293,7 +352,16 @@ server.tool(
       if (desc) lines.push(`  ${desc}`);
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      count: entries.length,
+      podlings: entries.map(([id, p]) => ({
+        id,
+        name: p.name || id,
+        started: p.started || null,
+        homepage: p.homepage || null,
+        description: (p.description || "").replace(/\s+/g, " ").trim() || null,
+      })),
+    });
   }
 );
 
@@ -315,18 +383,17 @@ server.tool(
       // Try fuzzy match
       const matches = Object.keys(releases).filter((k) => k.includes(key));
       if (matches.length > 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Project "${project}" not found. Did you mean: ${matches.join(", ")}?`,
-            },
-          ],
-        };
+        return makeResponse(
+          `Project "${project}" not found. Did you mean: ${matches.join(", ")}?`,
+          {
+            project: key,
+            count: 0,
+            releases: [],
+            suggestions: matches,
+          }
+        );
       }
-      return {
-        content: [{ type: "text", text: `No releases found for "${project}".` }],
-      };
+      return makeTextResponse(`No releases found for "${project}".`);
     }
 
     const entries = Object.entries(projectReleases);
@@ -346,7 +413,14 @@ server.tool(
       lines.push(`- **${name}** — ${date}`);
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      project: key,
+      count: entries.length,
+      releases: entries.map(([name, info]) => ({
+        name,
+        date: typeof info === "string" ? info : info.date || null,
+      })),
+    });
   }
 );
 
@@ -398,7 +472,14 @@ server.tool(
       lines.push(`- ${m.name} (${m.uid})`);
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      group: key,
+      count: enriched.length,
+      members: enriched.map((m) => ({
+        id: m.uid,
+        name: m.name,
+      })),
+    });
   }
 );
 
@@ -436,7 +517,14 @@ server.tool(
       lines.push(`- **${name}**: ${url}`);
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      project: project,
+      count: matches.length,
+      repositories: matches.map(([name, url]) => ({
+        name,
+        url,
+      })),
+    });
   }
 );
 
@@ -507,7 +595,19 @@ server.tool(
       lines.push(`\n... showing ${max} of ${total}.`);
     }
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      query,
+      count: results.length,
+      shown: items.length,
+      truncated: !!truncated,
+      projects: items.map((r) => ({
+        type: r.type,
+        id: r.id,
+        name: r.name,
+        description: r.desc || null,
+        homepage: r.homepage || null,
+      })),
+    });
   }
 );
 
@@ -545,7 +645,18 @@ server.tool(
     lines.push(`- **Projects with releases:** ${Object.keys(releases).length}`);
     lines.push(`- **Total releases tracked:** ${totalReleases}`);
 
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeResponse(lines.join("\n"), {
+      committees: committees.length,
+      podlings: Object.keys(podlings).length,
+      people: Object.keys(people).length,
+      members: memberCount,
+      groups: Object.keys(groups).length,
+      pmcGroups,
+      committerGroups,
+      repositories: Object.keys(repos).length,
+      projectsWithReleases: Object.keys(releases).length,
+      totalReleases,
+    });
   }
 );
 
@@ -553,8 +664,12 @@ server.tool(
 // Start
 // ---------------------------------------------------------------------------
 
-// Warm cache on startup (non-blocking — tools will fetch on demand if this is slow)
-warmCache().catch(() => {});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  // Warm cache on startup (non-blocking — tools will fetch on demand if this is slow)
+  warmCache().catch(() => {});
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+export { makeResponse, makeTextResponse };
