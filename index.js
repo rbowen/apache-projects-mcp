@@ -58,10 +58,51 @@ async function warmCache() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function matchesQuery(text, query) {
-  if (!query) return true;
-  const lower = query.toLowerCase();
-  return text.toLowerCase().includes(lower);
+function normalizeSearchText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactSearchText(text) {
+  return normalizeSearchText(text).replace(/\s+/g, "");
+}
+
+function rankedMatch(text, query) {
+  if (!query) return 0;
+
+  const normalizedText = normalizeSearchText(text);
+  const normalizedQuery = normalizeSearchText(query);
+  const compactText = compactSearchText(text);
+  const compactQuery = compactSearchText(query);
+
+  const variants = [
+    [normalizedText, normalizedQuery],
+    [compactText, compactQuery],
+  ];
+
+  let best = Infinity;
+  for (const [candidate, search] of variants) {
+    if (!search) continue;
+    const tokens = candidate.split(" ").filter(Boolean);
+    if (candidate === search) best = Math.min(best, 0);
+    else if (tokens.includes(search)) best = Math.min(best, 0);
+    else if (candidate.startsWith(search)) best = Math.min(best, 1);
+    else if (tokens.some((token) => token.startsWith(search))) {
+      best = Math.min(best, 1);
+    } else if (candidate.includes(search)) best = Math.min(best, 2);
+  }
+
+  return best;
+}
+
+function bestSearchRank(fields, query) {
+  return fields.reduce((best, field, index) => {
+    const rank = rankedMatch(field, query);
+    return Math.min(best, Number.isFinite(rank) ? rank * 10 + index : Infinity);
+  }, Infinity);
 }
 
 function truncateList(items, max = 50) {
@@ -108,13 +149,20 @@ server.tool(
 
     let results = committees;
     if (query) {
-      results = committees.filter(
-        (c) =>
-          matchesQuery(c.name || "", query) ||
-          matchesQuery(c.shortdesc || "", query) ||
-          matchesQuery(c.charter || "", query) ||
-          matchesQuery(c.id || "", query)
-      );
+      results = committees
+        .map((c) => ({
+          committee: c,
+          rank: bestSearchRank(
+            [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
+            query
+          ),
+        }))
+        .filter(({ rank }) => Number.isFinite(rank))
+        .sort((a, b) =>
+          a.rank - b.rank ||
+          (a.committee.name || "").localeCompare(b.committee.name || "")
+        )
+        .map(({ committee }) => committee);
     }
 
     const { items, truncated, total } = truncateList(results, max);
@@ -233,15 +281,15 @@ server.tool(
     const people = await getData("people");
     const names = await getData("people_name");
     const max = limit || 20;
-    const lower = query.toLowerCase();
-
     const matches = [];
     for (const [uid, info] of Object.entries(people)) {
       const name = names[uid] || info.name || "";
-      if (uid.toLowerCase().includes(lower) || name.toLowerCase().includes(lower)) {
-        matches.push({ uid, name, ...info });
+      const rank = bestSearchRank([uid, name], query);
+      if (Number.isFinite(rank)) {
+        matches.push({ ...info, uid, name, rank });
       }
     }
+    matches.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
 
     const { items, truncated, total } = truncateList(matches, max);
     const lines = [];
@@ -332,13 +380,17 @@ server.tool(
 
     let entries = Object.entries(podlings);
     if (query) {
-      const lower = query.toLowerCase();
-      entries = entries.filter(
-        ([id, p]) =>
-          id.toLowerCase().includes(lower) ||
-          (p.name || "").toLowerCase().includes(lower) ||
-          (p.description || "").toLowerCase().includes(lower)
-      );
+      entries = entries
+        .map(([id, p]) => ({
+          entry: [id, p],
+          rank: bestSearchRank([p.name || "", id, p.description || ""], query),
+        }))
+        .filter(({ rank }) => Number.isFinite(rank))
+        .sort((a, b) =>
+          a.rank - b.rank ||
+          (a.entry[1].name || "").localeCompare(b.entry[1].name || "")
+        )
+        .map(({ entry }) => entry);
     }
 
     const lines = [];
@@ -495,11 +547,15 @@ server.tool(
   },
   async ({ project }) => {
     const repos = await getData("repositories");
-    const lower = project.toLowerCase();
 
-    const matches = Object.entries(repos).filter(([name]) =>
-      name.toLowerCase().includes(lower)
-    );
+    const matches = Object.entries(repos)
+      .map(([name, url]) => ({
+        entry: [name, url],
+        rank: rankedMatch(name, project),
+      }))
+      .filter(({ rank }) => Number.isFinite(rank))
+      .sort((a, b) => a.rank - b.rank || a.entry[0].localeCompare(b.entry[0]))
+      .map(({ entry }) => entry);
 
     if (matches.length === 0) {
       return {
@@ -541,44 +597,42 @@ server.tool(
     const max = limit || 30;
     const committees = await getData("committees");
     const podlings = await getData("podlings");
-    const lower = query.toLowerCase();
 
     const results = [];
 
     // Search committees
     for (const c of committees) {
-      if (
-        matchesQuery(c.name || "", query) ||
-        matchesQuery(c.id || "", query) ||
-        matchesQuery(c.shortdesc || "", query) ||
-        matchesQuery(c.charter || "", query)
-      ) {
+      const rank = bestSearchRank(
+        [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
+        query
+      );
+      if (Number.isFinite(rank)) {
         results.push({
           type: "TLP",
           id: c.id,
           name: c.name,
           desc: c.shortdesc || "",
           homepage: c.homepage || "",
+          rank,
         });
       }
     }
 
     // Search podlings
     for (const [id, p] of Object.entries(podlings)) {
-      if (
-        id.toLowerCase().includes(lower) ||
-        matchesQuery(p.name || "", query) ||
-        matchesQuery(p.description || "", query)
-      ) {
+      const rank = bestSearchRank([p.name || "", id, p.description || ""], query);
+      if (Number.isFinite(rank)) {
         results.push({
           type: "Podling",
           id,
           name: p.name,
           desc: (p.description || "").replace(/\s+/g, " ").trim(),
           homepage: p.homepage || "",
+          rank,
         });
       }
     }
+    results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
 
     const { items, truncated, total } = truncateList(results, max);
     const lines = [];
