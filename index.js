@@ -123,6 +123,83 @@ function makeTextResponse(text) {
   };
 }
 
+function searchPeople(people, names, query, limit = 20) {
+  const matches = [];
+  for (const [uid, info] of Object.entries(people)) {
+    const name = names[uid] || info.name || "";
+    const rank = bestSearchRank([uid, name], query);
+    if (Number.isFinite(rank)) {
+      matches.push({ ...info, uid, name, rank });
+    }
+  }
+  matches.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+
+  const { items, truncated } = truncateList(matches, limit);
+  return {
+    query,
+    count: matches.length,
+    shown: items.length,
+    truncated: !!truncated,
+    people: items.map((p) => ({
+      id: p.uid,
+      name: p.name,
+      member: !!p.member,
+      groups: p.groups || [],
+    })),
+  };
+}
+
+function searchProjects(committees, podlings, query, limit = 30) {
+  const results = [];
+
+  for (const c of committees) {
+    const rank = bestSearchRank(
+      [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
+      query
+    );
+    if (Number.isFinite(rank)) {
+      results.push({
+        type: "TLP",
+        id: c.id,
+        name: c.name,
+        desc: c.shortdesc || "",
+        homepage: c.homepage || "",
+        rank,
+      });
+    }
+  }
+
+  for (const [id, p] of Object.entries(podlings)) {
+    const rank = bestSearchRank([p.name || "", id, p.description || ""], query);
+    if (Number.isFinite(rank)) {
+      results.push({
+        type: "Podling",
+        id,
+        name: p.name,
+        desc: (p.description || "").replace(/\s+/g, " ").trim(),
+        homepage: p.homepage || "",
+        rank,
+      });
+    }
+  }
+  results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+
+  const { items, truncated } = truncateList(results, limit);
+  return {
+    query,
+    count: results.length,
+    shown: items.length,
+    truncated: !!truncated,
+    projects: items.map((r) => ({
+      type: r.type,
+      id: r.id,
+      name: r.name,
+      description: r.desc || null,
+      homepage: r.homepage || null,
+    })),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -281,43 +358,22 @@ server.tool(
     const people = await getData("people");
     const names = await getData("people_name");
     const max = limit || 20;
-    const matches = [];
-    for (const [uid, info] of Object.entries(people)) {
-      const name = names[uid] || info.name || "";
-      const rank = bestSearchRank([uid, name], query);
-      if (Number.isFinite(rank)) {
-        matches.push({ ...info, uid, name, rank });
-      }
-    }
-    matches.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-
-    const { items, truncated, total } = truncateList(matches, max);
+    const result = searchPeople(people, names, query, max);
     const lines = [];
-    lines.push(`## People matching "${query}" (${matches.length} found)`);
+    lines.push(`## People matching "${query}" (${result.count} found)`);
     lines.push("");
 
-    for (const p of items) {
+    for (const p of result.people) {
       const memberStr = p.member ? " [ASF Member]" : "";
-      lines.push(`- **${p.name}** (${p.uid})${memberStr}`);
+      lines.push(`- **${p.name}** (${p.id})${memberStr}`);
       lines.push(`  Groups: ${(p.groups || []).join(", ")}`);
     }
 
-    if (truncated) {
-      lines.push(`\n... showing ${max} of ${total} results.`);
+    if (result.truncated) {
+      lines.push(`\n... showing ${max} of ${result.count} results.`);
     }
 
-    return makeResponse(lines.join("\n"), {
-      query,
-      count: matches.length,
-      shown: items.length,
-      truncated: !!truncated,
-      people: items.map((p) => ({
-        id: p.uid,
-        name: p.name,
-        member: !!p.member,
-        groups: p.groups || [],
-      })),
-    });
+    return makeResponse(lines.join("\n"), result);
   }
 );
 
@@ -597,71 +653,22 @@ server.tool(
     const max = limit || 30;
     const committees = await getData("committees");
     const podlings = await getData("podlings");
-
-    const results = [];
-
-    // Search committees
-    for (const c of committees) {
-      const rank = bestSearchRank(
-        [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
-        query
-      );
-      if (Number.isFinite(rank)) {
-        results.push({
-          type: "TLP",
-          id: c.id,
-          name: c.name,
-          desc: c.shortdesc || "",
-          homepage: c.homepage || "",
-          rank,
-        });
-      }
-    }
-
-    // Search podlings
-    for (const [id, p] of Object.entries(podlings)) {
-      const rank = bestSearchRank([p.name || "", id, p.description || ""], query);
-      if (Number.isFinite(rank)) {
-        results.push({
-          type: "Podling",
-          id,
-          name: p.name,
-          desc: (p.description || "").replace(/\s+/g, " ").trim(),
-          homepage: p.homepage || "",
-          rank,
-        });
-      }
-    }
-    results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-
-    const { items, truncated, total } = truncateList(results, max);
+    const result = searchProjects(committees, podlings, query, max);
     const lines = [];
-    lines.push(`## Projects matching "${query}" (${results.length} found)`);
+    lines.push(`## Projects matching "${query}" (${result.count} found)`);
     lines.push("");
 
-    for (const r of items) {
+    for (const r of result.projects) {
       lines.push(`- **${r.name}** (${r.id}) [${r.type}]`);
-      if (r.desc) lines.push(`  ${r.desc}`);
+      if (r.description) lines.push(`  ${r.description}`);
       if (r.homepage) lines.push(`  ${r.homepage}`);
     }
 
-    if (truncated) {
-      lines.push(`\n... showing ${max} of ${total}.`);
+    if (result.truncated) {
+      lines.push(`\n... showing ${max} of ${result.count}.`);
     }
 
-    return makeResponse(lines.join("\n"), {
-      query,
-      count: results.length,
-      shown: items.length,
-      truncated: !!truncated,
-      projects: items.map((r) => ({
-        type: r.type,
-        id: r.id,
-        name: r.name,
-        description: r.desc || null,
-        homepage: r.homepage || null,
-      })),
-    });
+    return makeResponse(lines.join("\n"), result);
   }
 );
 
@@ -726,4 +733,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
-export { makeResponse, makeTextResponse };
+export { makeResponse, makeTextResponse, searchPeople, searchProjects };
