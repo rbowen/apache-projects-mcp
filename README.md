@@ -2,7 +2,7 @@
 
 MCP server for querying Apache Software Foundation project data from [projects.apache.org/json/](https://projects.apache.org/json/) and [Whimsy public JSON](https://whimsy.apache.org/public/).
 
-## Data Sources
+This server provides a simple way for MCP clients to explore ASF committees, people, podlings, releases, LDAP groups, and repositories using data published by the ASF.
 
 Data is fetched from `https://projects.apache.org/json/foundation/` and `https://whimsy.apache.org/public/`, then cached for 6 hours:
 
@@ -17,7 +17,7 @@ Data is fetched from `https://projects.apache.org/json/foundation/` and `https:/
 | `releases.json` | Release history per project |
 | `repositories.json` | Source code repository URLs |
 
-## Tools
+## Available tools
 
 | Tool | Description |
 |------|-------------|
@@ -32,26 +32,61 @@ Data is fetched from `https://projects.apache.org/json/foundation/` and `https:/
 | `search_projects` | Unified search across TLPs and podlings |
 | `project_stats` | ASF-wide summary statistics |
 
-## Setup
+## Requirements
 
-```bash
-cd ~/devel/apache-projects-mcp
+- Node.js 18 or later  
+- An MCP-compatible client  
+
+## Installation
+
+Clone the repository and install dependencies:
+
+```
+git clone https://github.com/rbowen/apache-projects-mcp.git
+cd apache-projects-mcp
 npm install
 ```
 
-## Usage (stdio)
+## Running the server
 
-```bash
+Run the server over stdio:
+
+```
+npm start
+```
+
+You can also run it directly:
+
+```
 node index.js
 ```
 
-## Amazon Quick Configuration
+## Example MCP client configuration
 
-Add to your MCP server config:
+Example stdio configuration:
 
-```json
+```
 {
   "command": "node",
-  "args": ["/Users/rcbowen/devel/apache-projects-mcp/index.js"]
+  "args": ["/Users/yourname/apache-projects-mcp/index.js"]
 }
 ```
+
+Adjust the path to match your local checkout.
+
+## Example questions
+
+Once configured in an MCP client, you can ask things like:
+
+- “List projects related to data or storage”  
+- “Show me the PMC roster for Iceberg”  
+- “Find ASF committers named Justin”  
+- “What releases has Apache Spark had recently?”  
+- “Which repositories match Kafka?”  
+- “Search Apache projects related to security”  
+
+## Notes and limitations
+
+- Data comes from `projects.apache.org/json`, not directly from Git repositories, mailing lists, or podling status reports.  
+- Podling data is limited to the current contents of `podlings.json`.  
+- Data is cached for 6 hours in memory, so updates on the source side may not appear immediately.  
