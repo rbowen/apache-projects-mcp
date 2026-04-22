@@ -219,7 +219,11 @@ server.tool(
     );
 
     if (!c) {
-      return makeTextResponse(`Committee "${id}" not found.`);
+      return makeResponse(`Committee "${id}" not found.`, {
+        id: id.toLowerCase(),
+        found: false,
+        committee: null,
+      });
     }
 
     const lines = [];
@@ -336,7 +340,11 @@ server.tool(
     const person = people[uid];
 
     if (!person) {
-      return makeTextResponse(`Person "${id}" not found.`);
+      return makeResponse(`Person "${id}" not found.`, {
+        id: uid,
+        found: false,
+        person: null,
+      });
     }
 
     const name = names[uid] || person.name || uid;
@@ -445,7 +453,12 @@ server.tool(
           }
         );
       }
-      return makeTextResponse(`No releases found for "${project}".`);
+      return makeResponse(`No releases found for "${project}".`, {
+        project: key,
+        count: 0,
+        releases: [],
+        suggestions: [],
+      });
     }
 
     const entries = Object.entries(projectReleases);
@@ -496,18 +509,23 @@ server.tool(
       // Try to suggest
       const matches = Object.keys(groups).filter((k) => k.includes(key));
       if (matches.length > 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Group "${group}" not found. Similar groups: ${matches.slice(0, 10).join(", ")}`,
-            },
-          ],
-        };
+        const suggestions = matches.slice(0, 10);
+        return makeResponse(
+          `Group "${group}" not found. Similar groups: ${suggestions.join(", ")}`,
+          {
+            group: key,
+            count: 0,
+            members: [],
+            suggestions,
+          }
+        );
       }
-      return {
-        content: [{ type: "text", text: `Group "${group}" not found.` }],
-      };
+      return makeResponse(`Group "${group}" not found.`, {
+        group: key,
+        count: 0,
+        members: [],
+        suggestions: [],
+      });
     }
 
     const lines = [];
@@ -558,11 +576,11 @@ server.tool(
       .map(({ entry }) => entry);
 
     if (matches.length === 0) {
-      return {
-        content: [
-          { type: "text", text: `No repositories found matching "${project}".` },
-        ],
-      };
+      return makeResponse(`No repositories found matching "${project}".`, {
+        project,
+        count: 0,
+        repositories: [],
+      });
     }
 
     const lines = [];
@@ -726,4 +744,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
-export { makeResponse, makeTextResponse };
+export { makeResponse, makeTextResponse, server };
