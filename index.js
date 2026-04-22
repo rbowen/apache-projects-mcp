@@ -247,6 +247,57 @@ function addMemberSection(lines, title, members) {
   }
 }
 
+function makeProjectPeopleResponse({ id, committees, podlings, groups, names }) {
+  const target = findProjectOverviewTarget(committees, podlings, id);
+  if (!target) {
+    const suggestions = findProjectSuggestions(committees, podlings, id);
+    return makeResponse(formatProjectNotFound(id, committees, podlings), {
+      query: id,
+      found: false,
+      suggestions,
+    });
+  }
+
+  const pmcGroupName = `${target.groupBase}-pmc`;
+  const committerGroupName = target.groupBase;
+  const pmcMembers = enrichMembers(groups[pmcGroupName], names);
+  const committers = enrichMembers(groups[committerGroupName], names);
+
+  const lines = [];
+  lines.push(`# ${target.name} People`);
+  lines.push("");
+  lines.push(`- **Canonical ID:** ${target.id}`);
+  lines.push(`- **Type:** ${target.type}`);
+  lines.push(`- **PMC group name:** ${pmcGroupName}`);
+  lines.push(`- **PMC member count:** ${pmcMembers.length}`);
+  lines.push(`- **Committer group name:** ${committerGroupName}`);
+  lines.push(`- **Committer count:** ${committers.length}`);
+  lines.push("");
+  addMemberSection(lines, "PMC Members", pmcMembers);
+  lines.push("");
+  addMemberSection(lines, "Committers", committers);
+
+  return makeResponse(lines.join("\n"), {
+    query: id,
+    found: true,
+    id: target.id,
+    name: target.name,
+    type: target.type,
+    pmcGroupName,
+    pmcMemberCount: pmcMembers.length,
+    committerGroupName,
+    committerCount: committers.length,
+    pmcMembers: pmcMembers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+    committers: committers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+  });
+}
+
 function makeResponse(text, structuredContent) {
   return {
     content: [{ type: "text", text }],
@@ -489,35 +540,7 @@ server.tool(
     const groups = await getData("groups");
     const names = await getData("people_name");
 
-    const target = findProjectOverviewTarget(committees, podlings, id);
-    if (!target) {
-      return {
-        content: [
-          { type: "text", text: formatProjectNotFound(id, committees, podlings) },
-        ],
-      };
-    }
-
-    const pmcGroupName = `${target.groupBase}-pmc`;
-    const committerGroupName = target.groupBase;
-    const pmcMembers = enrichMembers(groups[pmcGroupName], names);
-    const committers = enrichMembers(groups[committerGroupName], names);
-
-    const lines = [];
-    lines.push(`# ${target.name} People`);
-    lines.push("");
-    lines.push(`- **Canonical ID:** ${target.id}`);
-    lines.push(`- **Type:** ${target.type}`);
-    lines.push(`- **PMC group name:** ${pmcGroupName}`);
-    lines.push(`- **PMC member count:** ${pmcMembers.length}`);
-    lines.push(`- **Committer group name:** ${committerGroupName}`);
-    lines.push(`- **Committer count:** ${committers.length}`);
-    lines.push("");
-    addMemberSection(lines, "PMC Members", pmcMembers);
-    lines.push("");
-    addMemberSection(lines, "Committers", committers);
-
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeProjectPeopleResponse({ id, committees, podlings, groups, names });
   }
 );
 
@@ -981,4 +1004,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
-export { makeResponse, makeTextResponse };
+export { makeProjectPeopleResponse, makeResponse, makeTextResponse };
