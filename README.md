@@ -37,16 +37,19 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 
 | Tool | Description |
 |------|-------------|
-| list_committees | Browse or search project committees by name or keyword |
-| get_committee | Get full PMC details, including roster, charter, and homepage |
-| search_people | Search for ASF committers and members by Apache ID or name |
-| get_person | Get details for a specific ASF person, including groups and PMC memberships |
-| list_podlings | List current incubating projects |
-| get_releases | Get release history for a project |
-| get_group_members | List members of an ASF LDAP group |
-| get_repositories | Find repositories for a project |
-| search_projects | Search across top-level projects and podlings |
-| project_stats | Return ASF-wide summary statistics |
+| `list_committees` | Browse/search PMCs by name, description, or charter |
+| `get_committee` | Full PMC detail: roster, chair, charter, homepage |
+| `get_project_overview` | One summary of a project's key ASF information, groups, repositories, and recent releases |
+| `get_project_people` | Detailed people view for a project: PMC members, committers, and counts |
+| `search_people` | Find committers by Apache ID or name |
+| `get_person` | Full detail on a person: groups, PMC memberships, member status |
+| `find_projects_by_person` | Reverse people lookup: project involvement grouped by PMC memberships and committer groups |
+| `list_podlings` | Current incubating projects |
+| `get_releases` | Release history for a project |
+| `get_group_members` | List members of an LDAP group (committer or PMC) |
+| `get_repositories` | Find repos for a project |
+| `search_projects` | Unified search across TLPs and podlings |
+| `project_stats` | ASF-wide summary statistics |
 
 ## Requirements
 
