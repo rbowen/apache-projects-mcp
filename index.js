@@ -177,6 +177,7 @@ function getDataStatus({
   cacheTtl = CACHE_TTL,
 } = {}) {
   const lines = [];
+  const sourceStatuses = [];
   lines.push("# Data Status");
   lines.push("");
   lines.push(`Cache TTL: ${formatAge(now - cacheTtl, now)}`);
@@ -202,9 +203,26 @@ function getDataStatus({
     if (status.lastError) {
       lines.push(`  Error: ${status.lastError}`);
     }
+
+    sourceStatuses.push({
+      key,
+      url: sources[key],
+      cached: hasCachedData,
+      age: cacheAge,
+      stale,
+      lastAttempt: status.lastAttempt || null,
+      lastRefresh: lastRefresh || null,
+      lastResult,
+      lastFailure: status.lastFailure || null,
+      error: status.lastError || null,
+    });
   }
 
-  return makeTextResponse(lines.join("\n"));
+  return makeResponse(lines.join("\n"), {
+    cacheTtl,
+    cacheTtlAge: formatAge(now - cacheTtl, now),
+    sources: sourceStatuses,
+  });
 }
 
 // ---------------------------------------------------------------------------

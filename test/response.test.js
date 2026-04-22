@@ -43,6 +43,22 @@ test('getDataStatus reports an unfetched data source', () => {
       '  Last refresh: never | Last result: not fetched',
     ].join('\n'),
   }]);
+  assert.deepStrictEqual(result.structuredContent, {
+    cacheTtl: 6 * 60 * 60 * 1000,
+    cacheTtlAge: '6h',
+    sources: [{
+      key: 'committees',
+      url: 'https://example.test/committees.json',
+      cached: false,
+      age: 'n/a',
+      stale: true,
+      lastAttempt: null,
+      lastRefresh: null,
+      lastResult: 'not fetched',
+      lastFailure: null,
+      error: null,
+    }],
+  });
 });
 
 test('getDataStatus reports fresh cached data after a successful refresh', () => {
@@ -74,6 +90,22 @@ test('getDataStatus reports fresh cached data after a successful refresh', () =>
     '  Last attempt: 2026-04-22T09:59:50.000Z',
     '  Last refresh: 2026-04-22T09:59:55.000Z | Last result: success',
   ].join('\n'));
+  assert.deepStrictEqual(result.structuredContent, {
+    cacheTtl: 10 * 60 * 1000,
+    cacheTtlAge: '10m',
+    sources: [{
+      key: 'people',
+      url: 'https://example.test/people.json',
+      cached: true,
+      age: '5m',
+      stale: false,
+      lastAttempt: attemptedAt,
+      lastRefresh: refreshedAt,
+      lastResult: 'success',
+      lastFailure: null,
+      error: null,
+    }],
+  });
 });
 
 test('getDataStatus reports stale cached data and the last failure', () => {
@@ -110,4 +142,20 @@ test('getDataStatus reports stale cached data and the last failure', () => {
     '  Last failure: 2026-04-22T09:59:35.000Z',
     '  Error: HTTP 500',
   ].join('\n'));
+  assert.deepStrictEqual(result.structuredContent, {
+    cacheTtl: 6 * 60 * 60 * 1000,
+    cacheTtlAge: '6h',
+    sources: [{
+      key: 'releases',
+      url: 'https://example.test/releases.json',
+      cached: true,
+      age: '7h',
+      stale: true,
+      lastAttempt: attemptedAt,
+      lastRefresh: cachedAt,
+      lastResult: 'failure',
+      lastFailure: failedAt,
+      error: 'HTTP 500',
+    }],
+  });
 });
