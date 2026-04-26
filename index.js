@@ -12,6 +12,7 @@ const BASE_URL = "https://projects.apache.org/json";
 // ---------------------------------------------------------------------------
 
 const cache = {};
+const cacheStatus = {};
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
 const DATA_SOURCES = {
@@ -32,13 +33,36 @@ async function getData(key) {
   const url = DATA_SOURCES[key];
   if (!url) throw new Error(`Unknown data source: ${key}`);
 
-  const resp = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!resp.ok) {
-    throw new Error(`Failed to fetch ${key}: HTTP ${resp.status}`);
+  cacheStatus[key] = {
+    ...(cacheStatus[key] || {}),
+    lastAttempt: now,
+    lastError: null,
+  };
+
+  try {
+    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    const refreshedAt = Date.now();
+    cache[key] = { data, ts: refreshedAt };
+    cacheStatus[key] = {
+      ...(cacheStatus[key] || {}),
+      lastAttempt: now,
+      lastSuccess: refreshedAt,
+      lastError: null,
+    };
+    return data;
+  } catch (e) {
+    cacheStatus[key] = {
+      ...(cacheStatus[key] || {}),
+      lastAttempt: now,
+      lastFailure: Date.now(),
+      lastError: e.message || String(e),
+    };
+    throw new Error(`Failed to fetch ${key}: ${e.message || e}`);
   }
-  const data = await resp.json();
-  cache[key] = { data, ts: now };
-  return data;
 }
 
 // Warm all caches
@@ -197,6 +221,28 @@ function matchesProjectRepository(name, target) {
   return false;
 }
 
+function formatTimestamp(ts) {
+  return ts ? new Date(ts).toISOString() : "never";
+}
+
+function formatAge(ts, now = Date.now()) {
+  if (!ts) return "n/a";
+
+  const seconds = Math.max(0, Math.floor((now - ts) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 48) return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours ? `${days}d ${remainingHours}h` : `${days}d`;
+}
+
 function makeResponse(text, structuredContent) {
   return {
     content: [{ type: "text", text }],
@@ -299,6 +345,62 @@ function makeProjectOverviewResponse({ id, committees, podlings, groups, repos, 
     committerCount: committers ? committers.length : null,
     repositories,
     recentReleases,
+  });
+}
+
+function getDataStatus({
+  now = Date.now(),
+  sources = DATA_SOURCES,
+  dataCache = cache,
+  statusCache = cacheStatus,
+  cacheTtl = CACHE_TTL,
+} = {}) {
+  const lines = [];
+  const sourceStatuses = [];
+  lines.push("# Data Status");
+  lines.push("");
+  lines.push(`Cache TTL: ${formatAge(now - cacheTtl, now)}`);
+  lines.push("");
+
+  for (const key of Object.keys(sources)) {
+    const cached = dataCache[key];
+    const status = statusCache[key] || {};
+    const hasCachedData = Boolean(cached);
+    const cacheAge = hasCachedData ? formatAge(cached.ts, now) : "n/a";
+    const stale = hasCachedData ? (now - cached.ts) >= cacheTtl : true;
+    const lastRefresh = status.lastSuccess || (cached && cached.ts);
+    const lastResult = status.lastError ? "failure" : status.lastSuccess ? "success" : "not fetched";
+
+    lines.push(`- **${key}**`);
+    lines.push(`  URL: ${sources[key]}`);
+    lines.push(`  Cached: ${hasCachedData ? "yes" : "no"} | Age: ${cacheAge} | Stale: ${stale ? "yes" : "no"}`);
+    lines.push(`  Last attempt: ${formatTimestamp(status.lastAttempt)}`);
+    lines.push(`  Last refresh: ${formatTimestamp(lastRefresh)} | Last result: ${lastResult}`);
+    if (status.lastFailure) {
+      lines.push(`  Last failure: ${formatTimestamp(status.lastFailure)}`);
+    }
+    if (status.lastError) {
+      lines.push(`  Error: ${status.lastError}`);
+    }
+
+    sourceStatuses.push({
+      key,
+      url: sources[key],
+      cached: hasCachedData,
+      age: cacheAge,
+      stale,
+      lastAttempt: status.lastAttempt || null,
+      lastRefresh: lastRefresh || null,
+      lastResult,
+      lastFailure: status.lastFailure || null,
+      error: status.lastError || null,
+    });
+  }
+
+  return makeResponse(lines.join("\n"), {
+    cacheTtl,
+    cacheTtlAge: formatAge(now - cacheTtl, now),
+    sources: sourceStatuses,
   });
 }
 
@@ -865,6 +967,14 @@ server.tool(
   }
 );
 
+// --- Tool: get_data_status --------------------------------------------------
+server.tool(
+  "get_data_status",
+  "Show cache and upstream fetch status for each Apache project data source.",
+  {},
+  async () => getDataStatus()
+);
+
 // --- Tool: project_stats ----------------------------------------------------
 server.tool(
   "project_stats",
@@ -926,4 +1036,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
-export { makeProjectOverviewResponse, makeResponse, makeTextResponse };
+export { getDataStatus, makeProjectOverviewResponse, makeResponse, makeTextResponse };
