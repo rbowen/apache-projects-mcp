@@ -1156,10 +1156,40 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
+function resetTestState() {
+  for (const key of Object.keys(cache)) {
+    delete cache[key];
+  }
+  for (const key of Object.keys(cacheStatus)) {
+    delete cacheStatus[key];
+  }
+}
+
 export {
+  addMemberSection,
+  bestSearchRank,
+  cleanText,
+  compactSearchText,
+  enrichMembers,
+  findProjectOverviewTarget,
+  findProjectSuggestions,
+  formatAge,
+  formatProjectNotFound,
+  formatTimestamp,
+  getData,
   getDataStatus,
+  getRecentReleases,
+  getReleaseDate,
   makeProjectOverviewResponse,
   makeProjectPeopleResponse,
   makeResponse,
   makeTextResponse,
+  matchesProjectRepository,
+  normalizeProjectId,
+  normalizeSearchText,
+  rankedMatch,
+  resetTestState,
+  server,
+  truncateList,
+  warmCache,
 };
