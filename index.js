@@ -200,6 +200,35 @@ function findProjectOverviewTarget(committees, podlings, id) {
   return null;
 }
 
+function findProjectSuggestions(committees, podlings, id) {
+  const key = normalizeProjectId(id);
+  const committeeMatches = committees
+    .filter(
+      (c) =>
+        (c.id || "").includes(key) ||
+        (c.group || "").includes(key) ||
+        (c.name || "").toLowerCase().includes(key)
+    )
+    .map((c) => c.id);
+  const podlingMatches = Object.entries(podlings)
+    .filter(
+      ([podlingId, p]) =>
+        podlingId.toLowerCase().includes(key) ||
+        (p.name || "").toLowerCase().includes(key)
+    )
+    .map(([podlingId]) => podlingId);
+
+  return [...committeeMatches, ...podlingMatches].slice(0, 10);
+}
+
+function formatProjectNotFound(id, committees, podlings) {
+  const suggestions = findProjectSuggestions(committees, podlings, id);
+  if (suggestions.length > 0) {
+    return `Project "${id}" not found. Similar project IDs: ${suggestions.join(", ")}.`;
+  }
+  return `Project "${id}" not found.`;
+}
+
 function matchesProjectRepository(name, target) {
   const lower = name.toLowerCase();
   const candidates = new Set([
@@ -221,6 +250,77 @@ function matchesProjectRepository(name, target) {
   return false;
 }
 
+function enrichMembers(members, names) {
+  return (members || [])
+    .map((uid) => ({
+      uid,
+      name: names[uid] || uid,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function addMemberSection(lines, title, members) {
+  lines.push(`## ${title} (${members.length})`);
+  if (members.length === 0) {
+    lines.push("None found.");
+    return;
+  }
+
+  for (const member of members) {
+    lines.push(`- ${member.name} (${member.uid})`);
+  }
+}
+
+function makeProjectPeopleResponse({ id, committees, podlings, groups, names }) {
+  const target = findProjectOverviewTarget(committees, podlings, id);
+  if (!target) {
+    const suggestions = findProjectSuggestions(committees, podlings, id);
+    return makeResponse(formatProjectNotFound(id, committees, podlings), {
+      query: id,
+      found: false,
+      suggestions,
+    });
+  }
+
+  const pmcGroupName = `${target.groupBase}-pmc`;
+  const committerGroupName = target.groupBase;
+  const pmcMembers = enrichMembers(groups[pmcGroupName], names);
+  const committers = enrichMembers(groups[committerGroupName], names);
+
+  const lines = [];
+  lines.push(`# ${target.name} People`);
+  lines.push("");
+  lines.push(`- **Canonical ID:** ${target.id}`);
+  lines.push(`- **Type:** ${target.type}`);
+  lines.push(`- **PMC group name:** ${pmcGroupName}`);
+  lines.push(`- **PMC member count:** ${pmcMembers.length}`);
+  lines.push(`- **Committer group name:** ${committerGroupName}`);
+  lines.push(`- **Committer count:** ${committers.length}`);
+  lines.push("");
+  addMemberSection(lines, "PMC Members", pmcMembers);
+  lines.push("");
+  addMemberSection(lines, "Committers", committers);
+
+  return makeResponse(lines.join("\n"), {
+    query: id,
+    found: true,
+    id: target.id,
+    name: target.name,
+    type: target.type,
+    pmcGroupName,
+    pmcMemberCount: pmcMembers.length,
+    committerGroupName,
+    committerCount: committers.length,
+    pmcMembers: pmcMembers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+    committers: committers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+  });
+}
 function formatTimestamp(ts) {
   return ts ? new Date(ts).toISOString() : "never";
 }
@@ -565,6 +665,26 @@ server.tool(
     const releases = await getData("releases");
 
     return makeProjectOverviewResponse({ id, committees, podlings, groups, repos, releases });
+  }
+);
+
+// --- Tool: get_project_people ----------------------------------------------
+server.tool(
+  "get_project_people",
+  "Get the people involved in an Apache project: PMC members, committers, " +
+    "and counts for each group.",
+  {
+    id: z.string().describe(
+      "Project ID (e.g. 'iceberg', 'httpd', 'spark')"
+    ),
+  },
+  async ({ id }) => {
+    const committees = await getData("committees");
+    const podlings = await getData("podlings");
+    const groups = await getData("groups");
+    const names = await getData("people_name");
+
+    return makeProjectPeopleResponse({ id, committees, podlings, groups, names });
   }
 );
 
@@ -1036,4 +1156,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
-export { getDataStatus, makeProjectOverviewResponse, makeResponse, makeTextResponse };
+export {
+  getDataStatus,
+  makeProjectOverviewResponse,
+  makeProjectPeopleResponse,
+  makeResponse,
+  makeTextResponse,
+};
