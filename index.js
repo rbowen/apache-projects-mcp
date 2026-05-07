@@ -12,6 +12,7 @@ const BASE_URL = "https://projects.apache.org/json";
 // ---------------------------------------------------------------------------
 
 const cache = {};
+const cacheStatus = {};
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
 const DATA_SOURCES = {
@@ -32,13 +33,36 @@ async function getData(key) {
   const url = DATA_SOURCES[key];
   if (!url) throw new Error(`Unknown data source: ${key}`);
 
-  const resp = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!resp.ok) {
-    throw new Error(`Failed to fetch ${key}: HTTP ${resp.status}`);
+  cacheStatus[key] = {
+    ...(cacheStatus[key] || {}),
+    lastAttempt: now,
+    lastError: null,
+  };
+
+  try {
+    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    const refreshedAt = Date.now();
+    cache[key] = { data, ts: refreshedAt };
+    cacheStatus[key] = {
+      ...(cacheStatus[key] || {}),
+      lastAttempt: now,
+      lastSuccess: refreshedAt,
+      lastError: null,
+    };
+    return data;
+  } catch (e) {
+    cacheStatus[key] = {
+      ...(cacheStatus[key] || {}),
+      lastAttempt: now,
+      lastFailure: Date.now(),
+      lastError: e.message || String(e),
+    };
+    throw new Error(`Failed to fetch ${key}: ${e.message || e}`);
   }
-  const data = await resp.json();
-  cache[key] = { data, ts: now };
-  return data;
 }
 
 // Warm all caches
@@ -286,7 +310,79 @@ function formatPersonProjectRole(groupName, project) {
       ? "Podling"
       : "LDAP group";
   const homepage = project.homepage ? ` | ${project.homepage}` : "";
-  return `- **${project.name}** (${project.id}) [${typeLabel}] — group: ${groupName}${homepage}`;
+  return `- **${project.name}** (${project.id}) [${typeLabel}] - group: ${groupName}${homepage}`;
+}
+
+function makeProjectPeopleResponse({ id, committees, podlings, groups, names }) {
+  const target = findProjectOverviewTarget(committees, podlings, id);
+  if (!target) {
+    const suggestions = findProjectSuggestions(committees, podlings, id);
+    return makeResponse(formatProjectNotFound(id, committees, podlings), {
+      query: id,
+      found: false,
+      suggestions,
+    });
+  }
+
+  const pmcGroupName = `${target.groupBase}-pmc`;
+  const committerGroupName = target.groupBase;
+  const pmcMembers = enrichMembers(groups[pmcGroupName], names);
+  const committers = enrichMembers(groups[committerGroupName], names);
+
+  const lines = [];
+  lines.push(`# ${target.name} People`);
+  lines.push("");
+  lines.push(`- **Canonical ID:** ${target.id}`);
+  lines.push(`- **Type:** ${target.type}`);
+  lines.push(`- **PMC group name:** ${pmcGroupName}`);
+  lines.push(`- **PMC member count:** ${pmcMembers.length}`);
+  lines.push(`- **Committer group name:** ${committerGroupName}`);
+  lines.push(`- **Committer count:** ${committers.length}`);
+  lines.push("");
+  addMemberSection(lines, "PMC Members", pmcMembers);
+  lines.push("");
+  addMemberSection(lines, "Committers", committers);
+
+  return makeResponse(lines.join("\n"), {
+    query: id,
+    found: true,
+    id: target.id,
+    name: target.name,
+    type: target.type,
+    pmcGroupName,
+    pmcMemberCount: pmcMembers.length,
+    committerGroupName,
+    committerCount: committers.length,
+    pmcMembers: pmcMembers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+    committers: committers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+  });
+}
+function formatTimestamp(ts) {
+  return ts ? new Date(ts).toISOString() : "never";
+}
+
+function formatAge(ts, now = Date.now()) {
+  if (!ts) return "n/a";
+
+  const seconds = Math.max(0, Math.floor((now - ts) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 48) return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours ? `${days}d ${remainingHours}h` : `${days}d`;
 }
 
 function makeResponse(text, structuredContent) {
@@ -393,6 +489,154 @@ function makeFindProjectsByPersonResponse({ id, committees, podlings, groups, pe
     committerGroupCount: committerMemberships.length,
     pmcMemberships,
     committerGroups: committerMemberships,
+  });
+}
+
+function makeProjectOverviewResponse({ id, committees, podlings, groups, repos, releases }) {
+  const target = findProjectOverviewTarget(committees, podlings, id);
+  if (!target) {
+    const key = normalizeProjectId(id);
+    const committeeMatches = committees
+      .filter(
+        (c) =>
+          (c.id || "").includes(key) ||
+          (c.group || "").includes(key) ||
+          (c.name || "").toLowerCase().includes(key)
+      )
+      .map((c) => c.id);
+    const podlingMatches = Object.entries(podlings)
+      .filter(
+        ([podlingId, p]) =>
+          podlingId.toLowerCase().includes(key) ||
+          (p.name || "").toLowerCase().includes(key)
+      )
+      .map(([podlingId]) => podlingId);
+    const suggestions = [...committeeMatches, ...podlingMatches].slice(0, 10);
+
+    const text =
+      suggestions.length > 0
+        ? `Project "${id}" not found. Similar project IDs: ${suggestions.join(", ")}.`
+        : `Project "${id}" not found.`;
+    return makeResponse(text, {
+      query: id,
+      found: false,
+      suggestions,
+    });
+  }
+
+  const pmcGroupName = `${target.groupBase}-pmc`;
+  const committerGroupName = target.groupBase;
+  const pmcMembers = groups[pmcGroupName];
+  const committers = groups[committerGroupName];
+  const repoMatches = Object.entries(repos)
+    .filter(([name]) => matchesProjectRepository(name, target))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const recentReleases = getRecentReleases(releases, target.id);
+  const description = cleanText(target.description) || null;
+  const repositories = repoMatches.map(([name, url]) => ({ name, url }));
+
+  const lines = [];
+  lines.push(`# ${target.name}`);
+  lines.push("");
+  lines.push(`- **Canonical ID:** ${target.id}`);
+  lines.push(`- **Type:** ${target.type}`);
+  lines.push(`- **Short description:** ${description || "N/A"}`);
+  lines.push(`- **Homepage:** ${target.homepage || "N/A"}`);
+  lines.push(`- **Chair:** ${target.chair || "N/A"}`);
+  lines.push(`- **PMC group name:** ${pmcGroupName}`);
+  lines.push(`- **PMC member count:** ${pmcMembers ? pmcMembers.length : "N/A"}`);
+  lines.push(`- **Committer group name:** ${committerGroupName}`);
+  lines.push(`- **Committer count:** ${committers ? committers.length : "N/A"}`);
+  lines.push("");
+  lines.push(`## Repositories (${repositories.length})`);
+  if (repositories.length === 0) {
+    lines.push("No repositories found.");
+  } else {
+    for (const repo of repositories) {
+      lines.push(`- **${repo.name}**: ${repo.url}`);
+    }
+  }
+  lines.push("");
+  lines.push(`## Recent Releases (${recentReleases.length})`);
+  if (recentReleases.length === 0) {
+    lines.push("No releases found.");
+  } else {
+    for (const release of recentReleases) {
+      lines.push(`- **${release.name}** — ${release.date}`);
+    }
+  }
+
+  return makeResponse(lines.join("\n"), {
+    query: id,
+    found: true,
+    id: target.id,
+    name: target.name,
+    type: target.type,
+    description,
+    homepage: target.homepage || null,
+    chair: target.chair || null,
+    pmcGroupName,
+    pmcMemberCount: pmcMembers ? pmcMembers.length : null,
+    committerGroupName,
+    committerCount: committers ? committers.length : null,
+    repositories,
+    recentReleases,
+  });
+}
+
+function getDataStatus({
+  now = Date.now(),
+  sources = DATA_SOURCES,
+  dataCache = cache,
+  statusCache = cacheStatus,
+  cacheTtl = CACHE_TTL,
+} = {}) {
+  const lines = [];
+  const sourceStatuses = [];
+  lines.push("# Data Status");
+  lines.push("");
+  lines.push(`Cache TTL: ${formatAge(now - cacheTtl, now)}`);
+  lines.push("");
+
+  for (const key of Object.keys(sources)) {
+    const cached = dataCache[key];
+    const status = statusCache[key] || {};
+    const hasCachedData = Boolean(cached);
+    const cacheAge = hasCachedData ? formatAge(cached.ts, now) : "n/a";
+    const stale = hasCachedData ? (now - cached.ts) >= cacheTtl : true;
+    const lastRefresh = status.lastSuccess || (cached && cached.ts);
+    const lastResult = status.lastError ? "failure" : status.lastSuccess ? "success" : "not fetched";
+
+    lines.push(`- **${key}**`);
+    lines.push(`  URL: ${sources[key]}`);
+    lines.push(`  Cached: ${hasCachedData ? "yes" : "no"} | Age: ${cacheAge} | Stale: ${stale ? "yes" : "no"}`);
+    lines.push(`  Last attempt: ${formatTimestamp(status.lastAttempt)}`);
+    lines.push(`  Last refresh: ${formatTimestamp(lastRefresh)} | Last result: ${lastResult}`);
+    if (status.lastFailure) {
+      lines.push(`  Last failure: ${formatTimestamp(status.lastFailure)}`);
+    }
+    if (status.lastError) {
+      lines.push(`  Error: ${status.lastError}`);
+    }
+
+    sourceStatuses.push({
+      key,
+      url: sources[key],
+      cached: hasCachedData,
+      age: cacheAge,
+      stale,
+      lastAttempt: status.lastAttempt || null,
+      lastRefresh: lastRefresh || null,
+      lastResult,
+      lastFailure: status.lastFailure || null,
+      error: status.lastError || null,
+    });
+  }
+
+  return makeResponse(lines.join("\n"), {
+    cacheTtl,
+    cacheTtlAge: formatAge(now - cacheTtl, now),
+    sources: sourceStatuses,
   });
 }
 
@@ -556,56 +800,7 @@ server.tool(
     const repos = await getData("repositories");
     const releases = await getData("releases");
 
-    const target = findProjectOverviewTarget(committees, podlings, id);
-    if (!target) {
-      return {
-        content: [
-          { type: "text", text: formatProjectNotFound(id, committees, podlings) },
-        ],
-      };
-    }
-
-    const pmcGroupName = `${target.groupBase}-pmc`;
-    const committerGroupName = target.groupBase;
-    const pmcMembers = groups[pmcGroupName];
-    const committers = groups[committerGroupName];
-    const repoMatches = Object.entries(repos)
-      .filter(([name]) => matchesProjectRepository(name, target))
-      .sort(([a], [b]) => a.localeCompare(b));
-    const recentReleases = getRecentReleases(releases, target.id);
-
-    const lines = [];
-    lines.push(`# ${target.name}`);
-    lines.push("");
-    lines.push(`- **Canonical ID:** ${target.id}`);
-    lines.push(`- **Type:** ${target.type}`);
-    lines.push(`- **Short description:** ${cleanText(target.description) || "N/A"}`);
-    lines.push(`- **Homepage:** ${target.homepage || "N/A"}`);
-    lines.push(`- **Chair:** ${target.chair || "N/A"}`);
-    lines.push(`- **PMC group name:** ${pmcGroupName}`);
-    lines.push(`- **PMC member count:** ${pmcMembers ? pmcMembers.length : "N/A"}`);
-    lines.push(`- **Committer group name:** ${committerGroupName}`);
-    lines.push(`- **Committer count:** ${committers ? committers.length : "N/A"}`);
-    lines.push("");
-    lines.push(`## Repositories (${repoMatches.length})`);
-    if (repoMatches.length === 0) {
-      lines.push("No repositories found.");
-    } else {
-      for (const [name, url] of repoMatches) {
-        lines.push(`- **${name}**: ${url}`);
-      }
-    }
-    lines.push("");
-    lines.push(`## Recent Releases (${recentReleases.length})`);
-    if (recentReleases.length === 0) {
-      lines.push("No releases found.");
-    } else {
-      for (const release of recentReleases) {
-        lines.push(`- **${release.name}** — ${release.date}`);
-      }
-    }
-
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeProjectOverviewResponse({ id, committees, podlings, groups, repos, releases });
   }
 );
 
@@ -625,35 +820,7 @@ server.tool(
     const groups = await getData("groups");
     const names = await getData("people_name");
 
-    const target = findProjectOverviewTarget(committees, podlings, id);
-    if (!target) {
-      return {
-        content: [
-          { type: "text", text: formatProjectNotFound(id, committees, podlings) },
-        ],
-      };
-    }
-
-    const pmcGroupName = `${target.groupBase}-pmc`;
-    const committerGroupName = target.groupBase;
-    const pmcMembers = enrichMembers(groups[pmcGroupName], names);
-    const committers = enrichMembers(groups[committerGroupName], names);
-
-    const lines = [];
-    lines.push(`# ${target.name} People`);
-    lines.push("");
-    lines.push(`- **Canonical ID:** ${target.id}`);
-    lines.push(`- **Type:** ${target.type}`);
-    lines.push(`- **PMC group name:** ${pmcGroupName}`);
-    lines.push(`- **PMC member count:** ${pmcMembers.length}`);
-    lines.push(`- **Committer group name:** ${committerGroupName}`);
-    lines.push(`- **Committer count:** ${committers.length}`);
-    lines.push("");
-    addMemberSection(lines, "PMC Members", pmcMembers);
-    lines.push("");
-    addMemberSection(lines, "Committers", committers);
-
-    return { content: [{ type: "text", text: lines.join("\n") }] };
+    return makeProjectPeopleResponse({ id, committees, podlings, groups, names });
   }
 );
 
@@ -1074,6 +1241,14 @@ server.tool(
   }
 );
 
+// --- Tool: get_data_status --------------------------------------------------
+server.tool(
+  "get_data_status",
+  "Show cache and upstream fetch status for each Apache project data source.",
+  {},
+  async () => getDataStatus()
+);
+
 // --- Tool: project_stats ----------------------------------------------------
 server.tool(
   "project_stats",
@@ -1135,4 +1310,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
-export { makeFindProjectsByPersonResponse, makeResponse, makeTextResponse };
+export {
+  getDataStatus,
+  makeFindProjectsByPersonResponse,
+  makeProjectOverviewResponse,
+  makeProjectPeopleResponse,
+  makeResponse,
+  makeTextResponse,
+};
