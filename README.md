@@ -40,6 +40,7 @@ All data is fetched from `https://projects.apache.org/json/foundation/` and cach
 | `list_committees` | Browse/search PMCs by name, description, or charter |
 | `get_committee` | Full PMC detail: roster, chair, charter, homepage |
 | `get_project_overview` | One summary of a project's key ASF information, groups, repositories, and recent releases |
+| `get_project_people` | Detailed people view for a project: PMC members, committers, and counts |
 | `search_people` | Find committers by Apache ID or name |
 | `get_person` | Full detail on a person: groups, PMC memberships, member status |
 | `list_podlings` | Current incubating projects |

@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { getDataStatus, makeProjectOverviewResponse, makeResponse } from '../index.js';
+import {
+  getDataStatus,
+  makeProjectOverviewResponse,
+  makeProjectPeopleResponse,
+  makeResponse,
+} from '../index.js';
 
 test('makeResponse returns content and structuredContent', () => {
   const text = 'hello';
@@ -89,6 +94,76 @@ test('makeProjectOverviewResponse returns structured suggestions when not found'
     groups: {},
     repos: {},
     releases: {},
+  });
+
+  assert.strictEqual(
+    result.content[0].text,
+    'Project "dem" not found. Similar project IDs: demo, demo_podling.'
+  );
+  assert.deepStrictEqual(result.structuredContent, {
+    query: 'dem',
+    found: false,
+    suggestions: ['demo', 'demo_podling'],
+  });
+});
+
+test('makeProjectPeopleResponse returns structured content for a committee', () => {
+  const result = makeProjectPeopleResponse({
+    id: 'demo',
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      group: 'demo',
+    }],
+    podlings: {},
+    groups: {
+      demo: ['carol', 'alice', 'bob'],
+      'demo-pmc': ['bob', 'alice'],
+    },
+    names: {
+      alice: 'Alice Example',
+      bob: 'Bob Example',
+      carol: 'Carol Example',
+    },
+  });
+
+  assert.match(result.content[0].text, /^# Apache Demo People/);
+  assert.match(result.content[0].text, /## PMC Members \(2\)/);
+  assert.deepStrictEqual(result.structuredContent, {
+    query: 'demo',
+    found: true,
+    id: 'demo',
+    name: 'Apache Demo',
+    type: 'committee',
+    pmcGroupName: 'demo-pmc',
+    pmcMemberCount: 2,
+    committerGroupName: 'demo',
+    committerCount: 3,
+    pmcMembers: [
+      { id: 'alice', name: 'Alice Example' },
+      { id: 'bob', name: 'Bob Example' },
+    ],
+    committers: [
+      { id: 'alice', name: 'Alice Example' },
+      { id: 'bob', name: 'Bob Example' },
+      { id: 'carol', name: 'Carol Example' },
+    ],
+  });
+});
+
+test('makeProjectPeopleResponse returns structured suggestions when not found', () => {
+  const result = makeProjectPeopleResponse({
+    id: 'dem',
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      group: 'demo',
+    }],
+    podlings: {
+      demo_podling: { name: 'Demo Podling' },
+    },
+    groups: {},
+    names: {},
   });
 
   assert.strictEqual(
