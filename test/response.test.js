@@ -3,6 +3,9 @@ import assert from 'node:assert';
 import {
   getDataStatus,
   makeFindProjectsByPersonResponse,
+  makeCommitteeResponse,
+  makeGroupMembersResponse,
+  makeListCommitteesResponse,
   makeProjectOverviewResponse,
   makeProjectPeopleResponse,
   makeResponse,
@@ -20,10 +23,90 @@ test('makeResponse returns content and structuredContent', () => {
 });
 
 test('structuredContent is present and object-like', () => {
-    const result = makeResponse('test', { foo: 'bar' });
+  const result = makeResponse('test', { foo: 'bar' });
 
-    assert.strictEqual(typeof result.structuredContent, 'object');
-    assert.strictEqual(result.structuredContent.foo, 'bar');
+  assert.strictEqual(typeof result.structuredContent, 'object');
+  assert.strictEqual(result.structuredContent.foo, 'bar');
+});
+
+test('makeListCommitteesResponse includes PMCs and podlings in structured content', () => {
+  const result = makeListCommitteesResponse({
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      shortdesc: 'Demo PMC',
+      chair: 'Jane Doe',
+      established: '2020-01',
+      homepage: 'https://demo.apache.org/',
+      type: 'PMC',
+    }],
+    podlings: {
+      pod: {
+        name: 'Apache Pod',
+        description: 'Podling project',
+        started: '2026-01',
+        homepage: 'https://pod.apache.org/',
+      },
+    },
+    limit: 1,
+  });
+
+  assert.match(result.content[0].text, /## Apache Committees \(2 total\)/);
+  assert.match(result.content[0].text, /\.\.\. showing 1 of 2 results/);
+  assert.deepStrictEqual(result.structuredContent, {
+    query: null,
+    count: 2,
+    shown: 1,
+    truncated: true,
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      shortdesc: 'Demo PMC',
+      chair: 'Jane Doe',
+      established: '2020-01',
+      homepage: 'https://demo.apache.org/',
+    }],
+  });
+});
+
+test('makeCommitteeResponse returns committee roster structured content', () => {
+  const result = makeCommitteeResponse({
+    id: 'demo',
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      group: 'demo',
+      chair: 'Jane Doe',
+      established: '2020-01',
+      homepage: 'https://demo.apache.org/',
+      reporting: 'January',
+      shortdesc: 'Demo PMC',
+      charter: 'Build demo things.',
+      roster: {
+        bob: { name: 'Bob Example', date: '2021-02-03' },
+        alice: { name: 'Alice Example' },
+      },
+    }],
+    podlings: {},
+  });
+
+  assert.match(result.content[0].text, /^# Apache Demo/);
+  assert.match(result.content[0].text, /## PMC Roster \(2 members\)/);
+  assert.deepStrictEqual(result.structuredContent, {
+    id: 'demo',
+    name: 'Apache Demo',
+    group: 'demo',
+    chair: 'Jane Doe',
+    established: '2020-01',
+    homepage: 'https://demo.apache.org/',
+    reporting: 'January',
+    shortdesc: 'Demo PMC',
+    charter: 'Build demo things.',
+    roster: [
+      { id: 'alice', name: 'Alice Example', joined: null },
+      { id: 'bob', name: 'Bob Example', joined: '2021-02-03' },
+    ],
+  });
 });
 
 test('makeFindProjectsByPersonResponse returns structured project roles', () => {
@@ -251,6 +334,50 @@ test('makeProjectPeopleResponse returns structured content for a committee', () 
   });
 });
 
+test('makeProjectPeopleResponse uses PPMC owners for a podling', () => {
+  const result = makeProjectPeopleResponse({
+    id: 'demo-podling',
+    committees: [],
+    podlings: {
+      'demo-podling': { name: 'Demo Podling' },
+    },
+    groups: {},
+    ldapProjectsData: {
+      projects: {
+        'demo-podling': {
+          owners: ['bob', 'alice'],
+          members: ['carol'],
+        },
+      },
+    },
+    names: {
+      alice: 'Alice Example',
+      bob: 'Bob Example',
+      carol: 'Carol Example',
+    },
+  });
+
+  assert.match(result.content[0].text, /PMC group name:\*\* demo-podling-ppmc/);
+  assert.deepStrictEqual(result.structuredContent, {
+    query: 'demo-podling',
+    found: true,
+    id: 'demo-podling',
+    name: 'Demo Podling',
+    type: 'podling',
+    pmcGroupName: 'demo-podling-ppmc',
+    pmcMemberCount: 2,
+    committerGroupName: 'demo-podling',
+    committerCount: 1,
+    pmcMembers: [
+      { id: 'alice', name: 'Alice Example' },
+      { id: 'bob', name: 'Bob Example' },
+    ],
+    committers: [
+      { id: 'carol', name: 'Carol Example' },
+    ],
+  });
+});
+
 test('makeProjectPeopleResponse returns structured suggestions when not found', () => {
   const result = makeProjectPeopleResponse({
     id: 'dem',
@@ -274,6 +401,36 @@ test('makeProjectPeopleResponse returns structured suggestions when not found', 
     query: 'dem',
     found: false,
     suggestions: ['demo', 'demo_podling'],
+  });
+});
+
+test('makeGroupMembersResponse returns sorted LDAP project owners', () => {
+  const result = makeGroupMembersResponse({
+    group: 'demo-pmc',
+    groups: {},
+    ldapProjectsData: {
+      projects: {
+        demo: {
+          owners: ['bob', 'alice'],
+          members: ['carol'],
+        },
+      },
+    },
+    names: {
+      alice: 'Alice Example',
+      bob: 'Bob Example',
+      carol: 'Carol Example',
+    },
+  });
+
+  assert.match(result.content[0].text, /## Group: demo \(2 members\)/);
+  assert.deepStrictEqual(result.structuredContent, {
+    group: 'demo-pmc',
+    count: 2,
+    members: [
+      { id: 'alice', name: 'Alice Example' },
+      { id: 'bob', name: 'Bob Example' },
+    ],
   });
 });
 
