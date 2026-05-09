@@ -1,6 +1,6 @@
 # apache-projects-mcp
 
-An MCP server for querying Apache Software Foundation project data from [`projects.apache.org/json`](https://projects.apache.org/json/).
+An MCP server for querying Apache Software Foundation project data from [`projects.apache.org/json`](https://projects.apache.org/json/) and [Whimsy public JSON](https://whimsy.apache.org/public/).
 
 This server provides a simple way for MCP clients to explore ASF committees, people, podlings, releases, LDAP groups, and repositories using data published by the ASF.
 
@@ -8,37 +8,39 @@ This server provides a simple way for MCP clients to explore ASF committees, peo
 
 The server currently provides tools to:
 
-- list and search Apache project committees  
-- get detailed committee information  
-- search for ASF committers and members  
-- get details about a specific person by Apache ID  
-- list current Incubator podlings  
-- get release history for a project  
-- list members of an ASF LDAP group  
-- find source code repositories for a project  
-- search across Apache top-level projects and podlings  
-- return ASF-wide summary statistics  
+- list and search Apache project committees and podlings
+- get detailed committee and podling information
+- search for ASF committers and members
+- get details about a specific person by Apache ID
+- find project involvement for a specific person
+- list current Incubator podlings
+- get release history for a project
+- list members of an ASF LDAP group
+- find source code repositories for a project
+- search across Apache top-level projects and podlings
+- return ASF-wide summary statistics
 
 ## Data sources
 
-All data is fetched from `https://projects.apache.org/json/foundation/` and cached in memory for 6 hours.
+Data is fetched from `https://projects.apache.org/json/foundation/` and `https://whimsy.apache.org/public/`, then cached for 6 hours.
 
 | File | Description |
 |------|-------------|
-| committees.json | Top-level project committees, including roster, chair, charter, and homepage |
-| people.json | ASF committers and member status |
-| people_name.json | Apache ID to full name mapping |
-| groups.json | LDAP groups, including committer and PMC memberships |
-| podlings.json | Current Apache Incubator podlings |
-| releases.json | Project release history |
-| repositories.json | Source code repository URLs |
+| `committees.json` | All TLP committees — roster, chair, charter, homepage |
+| `people.json` | All ASF committers — groups, member status |
+| `people_name.json` | Apache ID → full name mapping |
+| `groups.json` | LDAP groups — committer and PMC membership lists |
+| `public_ldap_projects.json` | Whimsy LDAP project entries — `members` for committers and `owners` for PMC/PPMC members |
+| `podlings.json` | Current Incubator podlings |
+| `releases.json` | Release history per project |
+| `repositories.json` | Source code repository URLs |
 
 ## Available tools
 
 | Tool | Description |
 |------|-------------|
-| `list_committees` | Browse/search PMCs by name, description, or charter |
-| `get_committee` | Full PMC detail: roster, chair, charter, homepage |
+| `list_committees` | Browse/search PMCs and podlings by name, description, or charter |
+| `get_committee` | Full PMC or podling detail: roster, chair, charter, homepage |
 | `get_project_overview` | One summary of a project's key ASF information, groups, repositories, and recent releases |
 | `get_project_people` | Detailed people view for a project: PMC members, committers, and counts |
 | `search_people` | Find committers by Apache ID or name |
@@ -108,4 +110,4 @@ Once configured in an MCP client, you can ask things like:
 
 - Data comes from `projects.apache.org/json`, not directly from Git repositories, mailing lists, or podling status reports.  
 - Podling data is limited to the current contents of `podlings.json`.  
-- Data is cached for 6 hours in memory, so updates on the source side may not appear immediately.  
+- Data is cached for 6 hours in memory, so updates on the source side may not appear immediately.
