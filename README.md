@@ -1,10 +1,28 @@
 # apache-projects-mcp
 
-MCP server for querying Apache Software Foundation project data from [projects.apache.org/json/](https://projects.apache.org/json/) and [Whimsy public JSON](https://whimsy.apache.org/public/).
+An MCP server for querying Apache Software Foundation project data from [`projects.apache.org/json`](https://projects.apache.org/json/) and [Whimsy public JSON](https://whimsy.apache.org/public/).
 
 This server provides a simple way for MCP clients to explore ASF committees, people, podlings, releases, LDAP groups, and repositories using data published by the ASF.
 
-Data is fetched from `https://projects.apache.org/json/foundation/` and `https://whimsy.apache.org/public/`, then cached for 6 hours:
+## Features
+
+The server currently provides tools to:
+
+- list and search Apache project committees and podlings
+- get detailed committee and podling information
+- search for ASF committers and members
+- get details about a specific person by Apache ID
+- find project involvement for a specific person
+- list current Incubator podlings
+- get release history for a project
+- list members of an ASF LDAP group
+- find source code repositories for a project
+- search across Apache top-level projects and podlings
+- return ASF-wide summary statistics
+
+## Data sources
+
+Data is fetched from `https://projects.apache.org/json/foundation/` and `https://whimsy.apache.org/public/`, then cached for 6 hours.
 
 | File | Description |
 |------|-------------|
