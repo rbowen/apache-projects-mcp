@@ -15,6 +15,10 @@ import {
   getDataStatus,
   getRecentReleases,
   getReleaseDate,
+  makeFindProjectsByPersonResponse,
+  makeCommitteeResponse,
+  makeGroupMembersResponse,
+  makeListCommitteesResponse,
   makeProjectOverviewResponse,
   makeProjectPeopleResponse,
   makeResponse,
@@ -84,6 +88,7 @@ const SOURCE_FIXTURES = {
     delta: ['dora'],
     'delta-pmc': ['dora'],
   },
+  ldap_projects: {},
   podlings: {
     demo_podling: {
       name: 'Demo Podling',
@@ -99,9 +104,14 @@ const SOURCE_FIXTURES = {
   },
 };
 
+function getFixtureSourceName(url) {
+  const fileName = url.split('/').pop().replace('.json', '');
+  return fileName === 'public_ldap_projects' ? 'ldap_projects' : fileName;
+}
+
 function mockFetchWithFixtures(fixtures = SOURCE_FIXTURES) {
   return async function fetch(url) {
-    const sourceName = url.split('/').pop().replace('.json', '');
+    const sourceName = getFixtureSourceName(url);
     const data = fixtures[sourceName];
     if (data === undefined) {
       return {
@@ -141,7 +151,7 @@ function createSpyFetch(fixtures = SOURCE_FIXTURES, failures = {}) {
   const calls = [];
   const fetch = async function(url) {
     calls.push(url);
-    const sourceName = url.split('/').pop().replace('.json', '');
+    const sourceName = getFixtureSourceName(url);
     if (sourceName in failures) {
       const failure = failures[sourceName];
       if (failure instanceof Error) {
@@ -194,10 +204,189 @@ test('makeResponse returns content and structuredContent', () => {
 });
 
 test('structuredContent is present and object-like', () => {
-    const result = makeResponse('test', { foo: 'bar' });
+  const result = makeResponse('test', { foo: 'bar' });
 
-    assert.strictEqual(typeof result.structuredContent, 'object');
-    assert.strictEqual(result.structuredContent.foo, 'bar');
+  assert.strictEqual(typeof result.structuredContent, 'object');
+  assert.strictEqual(result.structuredContent.foo, 'bar');
+});
+
+test('makeListCommitteesResponse includes PMCs and podlings in structured content', () => {
+  const result = makeListCommitteesResponse({
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      shortdesc: 'Demo PMC',
+      chair: 'Jane Doe',
+      established: '2020-01',
+      homepage: 'https://demo.apache.org/',
+      type: 'PMC',
+    }],
+    podlings: {
+      pod: {
+        name: 'Apache Pod',
+        description: 'Podling project',
+        started: '2026-01',
+        homepage: 'https://pod.apache.org/',
+      },
+    },
+    limit: 1,
+  });
+
+  assert.match(result.content[0].text, /## Apache Committees \(2 total\)/);
+  assert.match(result.content[0].text, /\.\.\. showing 1 of 2 results/);
+  assert.deepStrictEqual(result.structuredContent, {
+    query: null,
+    count: 2,
+    shown: 1,
+    truncated: true,
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      shortdesc: 'Demo PMC',
+      chair: 'Jane Doe',
+      established: '2020-01',
+      homepage: 'https://demo.apache.org/',
+    }],
+  });
+});
+
+test('makeCommitteeResponse returns committee roster structured content', () => {
+  const result = makeCommitteeResponse({
+    id: 'demo',
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      group: 'demo',
+      chair: 'Jane Doe',
+      established: '2020-01',
+      homepage: 'https://demo.apache.org/',
+      reporting: 'January',
+      shortdesc: 'Demo PMC',
+      charter: 'Build demo things.',
+      roster: {
+        bob: { name: 'Bob Example', date: '2021-02-03' },
+        alice: { name: 'Alice Example' },
+      },
+    }],
+    podlings: {},
+  });
+
+  assert.match(result.content[0].text, /^# Apache Demo/);
+  assert.match(result.content[0].text, /## PMC Roster \(2 members\)/);
+  assert.deepStrictEqual(result.structuredContent, {
+    id: 'demo',
+    name: 'Apache Demo',
+    group: 'demo',
+    chair: 'Jane Doe',
+    established: '2020-01',
+    homepage: 'https://demo.apache.org/',
+    reporting: 'January',
+    shortdesc: 'Demo PMC',
+    charter: 'Build demo things.',
+    roster: [
+      { id: 'alice', name: 'Alice Example', joined: null },
+      { id: 'bob', name: 'Bob Example', joined: '2021-02-03' },
+    ],
+  });
+});
+
+test('makeFindProjectsByPersonResponse returns structured project roles', () => {
+  const result = makeFindProjectsByPersonResponse({
+    id: 'jdoe',
+    committees: [{
+      id: 'demo',
+      name: 'Apache Demo',
+      group: 'demo',
+      homepage: 'https://demo.apache.org/',
+    }],
+    podlings: {
+      pod: {
+        name: 'Apache Pod',
+        homepage: 'https://pod.apache.org/',
+      },
+    },
+    groups: {
+      demo: ['jdoe'],
+      'demo-pmc': ['jdoe'],
+      pod: ['jdoe'],
+      other: ['someoneelse'],
+    },
+    people: {
+      jdoe: { member: true },
+    },
+    names: {
+      jdoe: 'Jane Doe',
+    },
+  });
+
+  assert.match(result.content[0].text, /^# Project involvement for Jane Doe \(jdoe\)/);
+  assert.match(result.content[0].text, /## PMC Memberships \(1\)/);
+  assert.match(result.content[0].text, /## Committer Groups \(2\)/);
+  assert.deepStrictEqual(result.structuredContent, {
+    query: 'jdoe',
+    found: true,
+    id: 'jdoe',
+    name: 'Jane Doe',
+    member: true,
+    pmcMembershipCount: 1,
+    committerGroupCount: 2,
+    pmcMemberships: [{
+      group: 'demo-pmc',
+      project: {
+        type: 'committee',
+        id: 'demo',
+        name: 'Apache Demo',
+        homepage: 'https://demo.apache.org/',
+      },
+    }],
+    committerGroups: [
+      {
+        group: 'demo',
+        project: {
+          type: 'committee',
+          id: 'demo',
+          name: 'Apache Demo',
+          homepage: 'https://demo.apache.org/',
+        },
+      },
+      {
+        group: 'pod',
+        project: {
+          type: 'podling',
+          id: 'pod',
+          name: 'Apache Pod',
+          homepage: 'https://pod.apache.org/',
+        },
+      },
+    ],
+  });
+});
+
+test('makeFindProjectsByPersonResponse returns structured suggestions when not found', () => {
+  const result = makeFindProjectsByPersonResponse({
+    id: 'jan',
+    committees: [],
+    podlings: {},
+    groups: {},
+    people: {},
+    names: {
+      jdoe: 'Jane Doe',
+      jsmith: 'Jan Smith',
+    },
+  });
+
+  assert.strictEqual(
+    result.content[0].text,
+    'Person "jan" not found. Similar people: Jane Doe (jdoe), Jan Smith (jsmith).'
+  );
+  assert.deepStrictEqual(result.structuredContent, {
+    query: 'jan',
+    found: false,
+    suggestions: [
+      { id: 'jdoe', name: 'Jane Doe', label: 'Jane Doe (jdoe)' },
+      { id: 'jsmith', name: 'Jan Smith', label: 'Jan Smith (jsmith)' },
+    ],
+  });
 });
 
 test('makeTextResponse returns text content without structuredContent', () => {
@@ -399,7 +588,7 @@ test('warmCache ignores failed sources and returns successful results', async ()
     assert.ok(result.committees);
     assert.ok(result.people);
     assert.ok(!('groups' in result));
-    assert.strictEqual(spy.calls.length, 7);
+    assert.strictEqual(spy.calls.length, 8);
   } finally {
     global.fetch = originalFetch;
     resetTestState();
@@ -518,7 +707,7 @@ test('makeProjectOverviewResponse returns structured content for a podling with 
     description: 'Experimental podling',
     homepage: 'https://demo-podling.apache.org/',
     chair: null,
-    pmcGroupName: 'demo_podling-pmc',
+    pmcGroupName: 'demo_podling-ppmc',
     pmcMemberCount: null,
     committerGroupName: 'demo_podling',
     committerCount: null,
@@ -566,6 +755,50 @@ test('makeProjectPeopleResponse returns structured content for a committee', () 
     committers: [
       { id: 'alice', name: 'Alice Example' },
       { id: 'bob', name: 'Bob Example' },
+      { id: 'carol', name: 'Carol Example' },
+    ],
+  });
+});
+
+test('makeProjectPeopleResponse uses PPMC owners for a podling', () => {
+  const result = makeProjectPeopleResponse({
+    id: 'demo-podling',
+    committees: [],
+    podlings: {
+      'demo-podling': { name: 'Demo Podling' },
+    },
+    groups: {},
+    ldapProjectsData: {
+      projects: {
+        'demo-podling': {
+          owners: ['bob', 'alice'],
+          members: ['carol'],
+        },
+      },
+    },
+    names: {
+      alice: 'Alice Example',
+      bob: 'Bob Example',
+      carol: 'Carol Example',
+    },
+  });
+
+  assert.match(result.content[0].text, /PMC group name:\*\* demo-podling-ppmc/);
+  assert.deepStrictEqual(result.structuredContent, {
+    query: 'demo-podling',
+    found: true,
+    id: 'demo-podling',
+    name: 'Demo Podling',
+    type: 'podling',
+    pmcGroupName: 'demo-podling-ppmc',
+    pmcMemberCount: 2,
+    committerGroupName: 'demo-podling',
+    committerCount: 1,
+    pmcMembers: [
+      { id: 'alice', name: 'Alice Example' },
+      { id: 'bob', name: 'Bob Example' },
+    ],
+    committers: [
       { id: 'carol', name: 'Carol Example' },
     ],
   });
@@ -619,12 +852,42 @@ test('makeProjectPeopleResponse returns empty member sections for a podling with
     id: 'demo_podling',
     name: 'Demo Podling',
     type: 'podling',
-    pmcGroupName: 'demo_podling-pmc',
+    pmcGroupName: 'demo_podling-ppmc',
     pmcMemberCount: 0,
     committerGroupName: 'demo_podling',
     committerCount: 0,
     pmcMembers: [],
     committers: [],
+  });
+});
+
+test('makeGroupMembersResponse returns sorted LDAP project owners', () => {
+  const result = makeGroupMembersResponse({
+    group: 'demo-pmc',
+    groups: {},
+    ldapProjectsData: {
+      projects: {
+        demo: {
+          owners: ['bob', 'alice'],
+          members: ['carol'],
+        },
+      },
+    },
+    names: {
+      alice: 'Alice Example',
+      bob: 'Bob Example',
+      carol: 'Carol Example',
+    },
+  });
+
+  assert.match(result.content[0].text, /## Group: demo \(2 members\)/);
+  assert.deepStrictEqual(result.structuredContent, {
+    group: 'demo-pmc',
+    count: 2,
+    members: [
+      { id: 'alice', name: 'Alice Example' },
+      { id: 'bob', name: 'Bob Example' },
+    ],
   });
 });
 
@@ -838,11 +1101,11 @@ test('list_committees returns filtered structured results', withMockedFetch(asyn
 test('list_committees returns truncated unfiltered results', withMockedFetch(async () => {
   const result = await getToolHandler('list_committees')({ limit: 1 });
 
-  assert.match(result.content[0].text, /Apache Committees \(2 total\)/);
-  assert.match(result.content[0].text, /showing 1 of 2 results/);
+  assert.match(result.content[0].text, /Apache Committees \(3 total\)/);
+  assert.match(result.content[0].text, /showing 1 of 3 results/);
   assert.deepStrictEqual(result.structuredContent, {
     query: null,
-    count: 2,
+    count: 3,
     shown: 1,
     truncated: true,
     committees: [{
@@ -856,11 +1119,16 @@ test('list_committees returns truncated unfiltered results', withMockedFetch(asy
   });
 }));
 
-test('get_committee returns a plain-text not found response for missing committees', withMockedFetch(async () => {
+test('get_committee returns structured content for missing committees', withMockedFetch(async () => {
   const result = await getToolHandler('get_committee')({ id: 'missing' });
 
   assert.deepStrictEqual(result, {
     content: [{ type: 'text', text: 'Committee "missing" not found.' }],
+    structuredContent: {
+      id: 'missing',
+      found: false,
+      committee: null,
+    },
   });
 }));
 
@@ -916,11 +1184,16 @@ test('get_person returns structured membership breakdown', withMockedFetch(async
   });
 }));
 
-test('get_person returns plain-text content when the person is missing', withMockedFetch(async () => {
+test('get_person returns structured content when the person is missing', withMockedFetch(async () => {
   const result = await getToolHandler('get_person')({ id: 'missing' });
 
   assert.deepStrictEqual(result, {
     content: [{ type: 'text', text: 'Person "missing" not found.' }],
+    structuredContent: {
+      id: 'missing',
+      found: false,
+      person: null,
+    },
   });
 }));
 
@@ -955,11 +1228,17 @@ test('get_releases returns suggestions when a project is missing', withMockedFet
   });
 }));
 
-test('get_releases returns plain-text content when there are no matches at all', withMockedFetch(async () => {
+test('get_releases returns structured content when there are no matches at all', withMockedFetch(async () => {
   const result = await getToolHandler('get_releases')({ project: 'zzz' });
 
   assert.deepStrictEqual(result, {
     content: [{ type: 'text', text: 'No releases found for "zzz".' }],
+    structuredContent: {
+      project: 'zzz',
+      count: 0,
+      releases: [],
+      suggestions: [],
+    },
   });
 }));
 
@@ -991,7 +1270,7 @@ test('get_group_members returns structured member names', withMockedFetch(async 
   });
 }));
 
-test('get_group_members returns similar-group suggestions', withMockedFetch(async () => {
+test('get_group_members returns structured similar-group suggestions', withMockedFetch(async () => {
   const result = await getToolHandler('get_group_members')({ group: 'dem' });
 
   assert.deepStrictEqual(result, {
@@ -999,22 +1278,39 @@ test('get_group_members returns similar-group suggestions', withMockedFetch(asyn
       type: 'text',
       text: 'Group "dem" not found. Similar groups: demo, demo-pmc',
     }],
+    structuredContent: {
+      group: 'dem',
+      count: 0,
+      members: [],
+      suggestions: ['demo', 'demo-pmc'],
+    },
   });
 }));
 
-test('get_group_members returns plain-text content when no groups match', withMockedFetch(async () => {
+test('get_group_members returns structured content when no groups match', withMockedFetch(async () => {
   const result = await getToolHandler('get_group_members')({ group: 'zzz' });
 
   assert.deepStrictEqual(result, {
     content: [{ type: 'text', text: 'Group "zzz" not found.' }],
+    structuredContent: {
+      group: 'zzz',
+      count: 0,
+      members: [],
+      suggestions: [],
+    },
   });
 }));
 
-test('get_repositories returns plain-text content when no repositories match', withMockedFetch(async () => {
+test('get_repositories returns structured content when no repositories match', withMockedFetch(async () => {
   const result = await getToolHandler('get_repositories')({ project: 'zzz' });
 
   assert.deepStrictEqual(result, {
     content: [{ type: 'text', text: 'No repositories found matching "zzz".' }],
+    structuredContent: {
+      project: 'zzz',
+      count: 0,
+      repositories: [],
+    },
   });
 }));
 
@@ -1089,7 +1385,7 @@ test('get_data_status tool returns the structured cache status view', withMocked
   const result = await getToolHandler('get_data_status')({});
 
   assert.match(result.content[0].text, /# Data Status/);
-  assert.strictEqual(result.structuredContent.sources.length, 7);
+  assert.strictEqual(result.structuredContent.sources.length, 8);
   assert.strictEqual(result.structuredContent.sources[0].key, 'committees');
 }));
 
