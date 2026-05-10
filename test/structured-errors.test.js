@@ -4,6 +4,7 @@ import { server } from '../index.js';
 
 const fixtures = {
   committees: [],
+  podlings: {},
   people: {},
   people_name: {},
   releases: {
@@ -12,6 +13,7 @@ const fixtures = {
   groups: {
     'iceberg-pmc': [],
   },
+  ldap_projects: {},
   repositories: {
     'apache-iceberg': 'https://github.com/apache/iceberg',
   },
@@ -20,10 +22,12 @@ const fixtures = {
 globalThis.fetch = async (url) => {
   const source = Object.entries({
     committees: '/foundation/committees.json',
+    podlings: '/foundation/podlings.json',
     people_name: '/foundation/people_name.json',
     people: '/foundation/people.json',
     releases: '/foundation/releases.json',
     groups: '/foundation/groups.json',
+    ldap_projects: '/public_ldap_projects.json',
     repositories: '/foundation/repositories.json',
   }).find(([, suffix]) => url.endsWith(suffix));
 

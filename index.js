@@ -12,6 +12,7 @@ const BASE_URL = "https://projects.apache.org/json";
 // ---------------------------------------------------------------------------
 
 const cache = {};
+const cacheStatus = {};
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
 const DATA_SOURCES = {
@@ -20,6 +21,7 @@ const DATA_SOURCES = {
   people_name:  `${BASE_URL}/foundation/people_name.json`,
   releases:     `${BASE_URL}/foundation/releases.json`,
   groups:       `${BASE_URL}/foundation/groups.json`,
+  ldap_projects: "https://whimsy.apache.org/public/public_ldap_projects.json",
   podlings:     `${BASE_URL}/foundation/podlings.json`,
   repositories: `${BASE_URL}/foundation/repositories.json`,
 };
@@ -32,13 +34,36 @@ async function getData(key) {
   const url = DATA_SOURCES[key];
   if (!url) throw new Error(`Unknown data source: ${key}`);
 
-  const resp = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!resp.ok) {
-    throw new Error(`Failed to fetch ${key}: HTTP ${resp.status}`);
+  cacheStatus[key] = {
+    ...(cacheStatus[key] || {}),
+    lastAttempt: now,
+    lastError: null,
+  };
+
+  try {
+    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    const refreshedAt = Date.now();
+    cache[key] = { data, ts: refreshedAt };
+    cacheStatus[key] = {
+      ...(cacheStatus[key] || {}),
+      lastAttempt: now,
+      lastSuccess: refreshedAt,
+      lastError: null,
+    };
+    return data;
+  } catch (e) {
+    cacheStatus[key] = {
+      ...(cacheStatus[key] || {}),
+      lastAttempt: now,
+      lastFailure: Date.now(),
+      lastError: e.message || String(e),
+    };
+    throw new Error(`Failed to fetch ${key}: ${e.message || e}`);
   }
-  const data = await resp.json();
-  cache[key] = { data, ts: now };
-  return data;
 }
 
 // Warm all caches
@@ -110,6 +135,285 @@ function truncateList(items, max = 50) {
   return { items: items.slice(0, max), truncated: true, total: items.length };
 }
 
+function isPmcGroupName(group) {
+  return group.endsWith("-pmc") || group.endsWith("-ppmc");
+}
+
+function getPmcGroupBase(group) {
+  return group.replace(/-p?pmc$/, "");
+}
+
+function getLdapProjects(data) {
+  return data.projects || data;
+}
+
+function normalizeProjectId(id) {
+  return id.trim().toLowerCase();
+}
+
+function cleanText(text) {
+  return (text || "").replace(/\s+/g, " ").trim();
+}
+
+function getReleaseDate(info) {
+  return typeof info === "string" ? info : info.date || "";
+}
+
+function getRecentReleases(releases, projectId, max = 5) {
+  const projectReleases = releases[projectId];
+  if (!projectReleases) return [];
+
+  return Object.entries(projectReleases)
+    .map(([name, info]) => ({
+      name,
+      date: getReleaseDate(info) || "unknown",
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, max);
+}
+
+function findProjectOverviewTarget(committees, podlings, id) {
+  const key = normalizeProjectId(id);
+
+  const committee = committees.find(
+    (c) =>
+      c.id === key ||
+      c.group === key ||
+      (c.name || "").toLowerCase() === key
+  );
+  if (committee) {
+    return {
+      type: "committee",
+      id: committee.id,
+      name: committee.name,
+      description: committee.shortdesc || "",
+      homepage: committee.homepage || "",
+      chair: committee.chair || "",
+      groupBase: committee.group || committee.id,
+    };
+  }
+
+  for (const [podlingId, podling] of Object.entries(podlings)) {
+    if (
+      podlingId.toLowerCase() === key ||
+      (podling.name || "").toLowerCase() === key
+    ) {
+      return {
+        type: "podling",
+        id: podlingId,
+        name: podling.name || podlingId,
+        description: podling.description || "",
+        homepage: podling.homepage || "",
+        chair: "",
+        groupBase: podlingId,
+      };
+    }
+  }
+
+  return null;
+}
+
+function findProjectSuggestions(committees, podlings, id) {
+  const key = normalizeProjectId(id);
+  const committeeMatches = committees
+    .filter(
+      (c) =>
+        (c.id || "").includes(key) ||
+        (c.group || "").includes(key) ||
+        (c.name || "").toLowerCase().includes(key)
+    )
+    .map((c) => c.id);
+  const podlingMatches = Object.entries(podlings)
+    .filter(
+      ([podlingId, p]) =>
+        podlingId.toLowerCase().includes(key) ||
+        (p.name || "").toLowerCase().includes(key)
+    )
+    .map(([podlingId]) => podlingId);
+
+  return [...committeeMatches, ...podlingMatches].slice(0, 10);
+}
+
+function formatProjectNotFound(id, committees, podlings) {
+  const suggestions = findProjectSuggestions(committees, podlings, id);
+  if (suggestions.length > 0) {
+    return `Project "${id}" not found. Similar project IDs: ${suggestions.join(", ")}.`;
+  }
+  return `Project "${id}" not found.`;
+}
+
+function matchesProjectRepository(name, target) {
+  const lower = name.toLowerCase();
+  const candidates = new Set([
+    target.id.toLowerCase(),
+    target.groupBase.toLowerCase(),
+  ]);
+
+  for (const candidate of candidates) {
+    if (
+      lower === candidate ||
+      lower.startsWith(`${candidate}-`) ||
+      lower.startsWith(`${candidate}_`) ||
+      lower.startsWith(`${candidate}.`)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function enrichMembers(members, names) {
+  return (members || [])
+    .map((uid) => ({
+      uid,
+      name: names[uid] || uid,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const formatMembers = enrichMembers;
+
+function getProjectGroups(target) {
+  const committerGroupName = target.groupBase;
+  const pmcGroupName = target.type === "podling"
+    ? `${target.groupBase}-ppmc`
+    : `${target.groupBase}-pmc`;
+  return { committerGroupName, pmcGroupName };
+}
+
+function addMemberSection(lines, title, members) {
+  lines.push(`## ${title} (${members.length})`);
+  if (members.length === 0) {
+    lines.push("None found.");
+    return;
+  }
+
+  for (const member of members) {
+    lines.push(`- ${member.name} (${member.uid})`);
+  }
+}
+
+function findProjectByGroupBase(committees, podlings, groupBase) {
+  const key = groupBase.toLowerCase();
+  const committee = committees.find(
+    (c) => c.id === key || c.group === key
+  );
+  if (committee) {
+    return {
+      type: "committee",
+      id: committee.id,
+      name: committee.name,
+      homepage: committee.homepage || "",
+    };
+  }
+
+  const podling = podlings[key];
+  if (podling) {
+    return {
+      type: "podling",
+      id: key,
+      name: podling.name || key,
+      homepage: podling.homepage || "",
+    };
+  }
+
+  return {
+    type: "group",
+    id: key,
+    name: key,
+    homepage: "",
+  };
+}
+
+function formatPersonProjectRole(groupName, project) {
+  const typeLabel = project.type === "committee"
+    ? "TLP"
+    : project.type === "podling"
+      ? "Podling"
+      : "LDAP group";
+  const homepage = project.homepage ? ` | ${project.homepage}` : "";
+  return `- **${project.name}** (${project.id}) [${typeLabel}] - group: ${groupName}${homepage}`;
+}
+
+function makeProjectPeopleResponse({ id, committees, podlings, groups, ldapProjectsData = {}, names }) {
+  const target = findProjectOverviewTarget(committees, podlings, id);
+  if (!target) {
+    const suggestions = findProjectSuggestions(committees, podlings, id);
+    return makeResponse(formatProjectNotFound(id, committees, podlings), {
+      query: id,
+      found: false,
+      suggestions,
+    });
+  }
+
+  const { pmcGroupName, committerGroupName } = getProjectGroups(target);
+  const ldapProject = getLdapProjects(ldapProjectsData)[target.groupBase];
+  const pmcMembers = enrichMembers(
+    ldapProject?.owners || groups[pmcGroupName],
+    names
+  );
+  const committers = enrichMembers(
+    ldapProject?.members || groups[committerGroupName],
+    names
+  );
+
+  const lines = [];
+  lines.push(`# ${target.name} People`);
+  lines.push("");
+  lines.push(`- **Canonical ID:** ${target.id}`);
+  lines.push(`- **Type:** ${target.type}`);
+  lines.push(`- **PMC group name:** ${pmcGroupName}`);
+  lines.push(`- **PMC member count:** ${pmcMembers.length}`);
+  lines.push(`- **Committer group name:** ${committerGroupName}`);
+  lines.push(`- **Committer count:** ${committers.length}`);
+  lines.push("");
+  addMemberSection(lines, "PMC Members", pmcMembers);
+  lines.push("");
+  addMemberSection(lines, "Committers", committers);
+
+  return makeResponse(lines.join("\n"), {
+    query: id,
+    found: true,
+    id: target.id,
+    name: target.name,
+    type: target.type,
+    pmcGroupName,
+    pmcMemberCount: pmcMembers.length,
+    committerGroupName,
+    committerCount: committers.length,
+    pmcMembers: pmcMembers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+    committers: committers.map((member) => ({
+      id: member.uid,
+      name: member.name,
+    })),
+  });
+}
+function formatTimestamp(ts) {
+  return ts ? new Date(ts).toISOString() : "never";
+}
+
+function formatAge(ts, now = Date.now()) {
+  if (!ts) return "n/a";
+
+  const seconds = Math.max(0, Math.floor((now - ts) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 48) return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours ? `${days}d ${remainingHours}h` : `${days}d`;
+}
+
 function makeResponse(text, structuredContent) {
   return {
     content: [{ type: "text", text }],
@@ -121,6 +425,539 @@ function makeTextResponse(text) {
   return {
     content: [{ type: "text", text }],
   };
+}
+
+function searchPeople(people, names, query, limit = 20) {
+  const matches = [];
+  for (const [uid, info] of Object.entries(people)) {
+    const name = names[uid] || info.name || "";
+    const rank = bestSearchRank([uid, name], query);
+    if (Number.isFinite(rank)) {
+      matches.push({ ...info, uid, name, rank });
+    }
+  }
+  matches.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+
+  const { items, truncated } = truncateList(matches, limit);
+  return {
+    query,
+    count: matches.length,
+    shown: items.length,
+    truncated: !!truncated,
+    people: items.map((p) => ({
+      id: p.uid,
+      name: p.name,
+      member: !!p.member,
+      groups: p.groups || [],
+    })),
+  };
+}
+
+function searchProjects(committees, podlings, query, limit = 30) {
+  const results = [];
+
+  for (const c of committees) {
+    const rank = bestSearchRank(
+      [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
+      query
+    );
+    if (Number.isFinite(rank)) {
+      results.push({
+        type: "TLP",
+        id: c.id,
+        name: c.name,
+        desc: c.shortdesc || "",
+        homepage: c.homepage || "",
+        rank,
+      });
+    }
+  }
+
+  for (const [id, p] of Object.entries(podlings)) {
+    const rank = bestSearchRank([p.name || "", id, p.description || ""], query);
+    if (Number.isFinite(rank)) {
+      results.push({
+        type: "Podling",
+        id,
+        name: p.name,
+        desc: (p.description || "").replace(/\s+/g, " ").trim(),
+        homepage: p.homepage || "",
+        rank,
+      });
+    }
+  }
+  results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+
+  const { items, truncated } = truncateList(results, limit);
+  return {
+    query,
+    count: results.length,
+    shown: items.length,
+    truncated: !!truncated,
+    projects: items.map((r) => ({
+      type: r.type,
+      id: r.id,
+      name: r.name,
+      description: r.desc || null,
+      homepage: r.homepage || null,
+    })),
+  };
+}
+
+function makeFindProjectsByPersonResponse({
+  id,
+  committees,
+  podlings,
+  groups,
+  ldapProjectsData = {},
+  people,
+  names,
+}) {
+  const uid = id.toLowerCase();
+  const person = people[uid];
+  const personGroupSet = new Set(
+    Object.entries(groups)
+      .filter(([, members]) => (members || []).includes(uid))
+      .map(([group]) => group)
+  );
+
+  for (const [projectId, project] of Object.entries(getLdapProjects(ldapProjectsData))) {
+    if ((project.owners || []).includes(uid)) {
+      personGroupSet.add(`${projectId}-ppmc`);
+    }
+    if ((project.members || []).includes(uid)) {
+      personGroupSet.add(projectId);
+    }
+  }
+
+  const personGroups = [...personGroupSet];
+
+  if (!person && !names[uid] && personGroups.length === 0) {
+    const lower = uid.toLowerCase();
+    const suggestions = Object.entries(names)
+      .filter(
+        ([candidateUid, name]) =>
+          candidateUid.toLowerCase().includes(lower) ||
+          (name || "").toLowerCase().includes(lower)
+      )
+      .slice(0, 10)
+      .map(([candidateUid, name]) => ({
+        id: candidateUid,
+        name,
+        label: `${name} (${candidateUid})`,
+      }));
+
+    const suggestionText = suggestions.length > 0
+      ? ` Similar people: ${suggestions.map((suggestion) => suggestion.label).join(", ")}.`
+      : "";
+    return makeResponse(`Person "${id}" not found.${suggestionText}`, {
+      query: id,
+      found: false,
+      suggestions,
+    });
+  }
+
+  const name = names[uid] || person?.name || uid;
+  const pmcGroups = personGroups
+    .filter(isPmcGroupName)
+    .sort((a, b) => a.localeCompare(b));
+  const committerGroups = personGroups
+    .filter((group) => !isPmcGroupName(group))
+    .sort((a, b) => a.localeCompare(b));
+  const projectForGroup = (group) => {
+    const groupBase = isPmcGroupName(group) ? getPmcGroupBase(group) : group;
+    const project = findProjectByGroupBase(committees, podlings, groupBase);
+    return {
+      group,
+      project: {
+        type: project.type,
+        id: project.id,
+        name: project.name,
+        homepage: project.homepage || null,
+      },
+    };
+  };
+  const pmcMemberships = pmcGroups.map(projectForGroup);
+  const committerMemberships = committerGroups.map(projectForGroup);
+
+  const lines = [];
+  lines.push(`# Project involvement for ${name} (${uid})`);
+  lines.push("");
+  lines.push(`- **ASF Member:** ${person?.member ? "Yes" : "No"}`);
+  lines.push(`- **PMC memberships:** ${pmcMemberships.length}`);
+  lines.push(`- **Committer groups:** ${committerMemberships.length}`);
+  lines.push("");
+  lines.push(`## PMC Memberships (${pmcMemberships.length})`);
+  if (pmcMemberships.length === 0) {
+    lines.push("None found.");
+  } else {
+    for (const membership of pmcMemberships) {
+      lines.push(formatPersonProjectRole(membership.group, membership.project));
+    }
+  }
+
+  lines.push("");
+  lines.push(`## Committer Groups (${committerMemberships.length})`);
+  if (committerMemberships.length === 0) {
+    lines.push("None found.");
+  } else {
+    for (const membership of committerMemberships) {
+      lines.push(formatPersonProjectRole(membership.group, membership.project));
+    }
+  }
+
+  return makeResponse(lines.join("\n"), {
+    query: id,
+    found: true,
+    id: uid,
+    name,
+    member: !!person?.member,
+    pmcMembershipCount: pmcMemberships.length,
+    committerGroupCount: committerMemberships.length,
+    pmcMemberships,
+    committerGroups: committerMemberships,
+  });
+}
+
+function makeListCommitteesResponse({ committees, podlings, query, limit }) {
+  const max = limit || 50;
+
+  let results = [
+    ...committees.map((c) => ({ ...c, type: "PMC" })),
+    ...Object.entries(podlings).map(([id, p]) => ({
+      id,
+      name: p.name || id,
+      shortdesc: p.description || "",
+      chair: "N/A",
+      established: p.started || "unknown",
+      homepage: p.homepage || "",
+      charter: "",
+      type: "Podling",
+    })),
+  ];
+  if (query) {
+    results = results
+      .map((c) => ({
+        item: c,
+        rank: bestSearchRank(
+          [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
+          query
+        ),
+      }))
+      .filter(({ rank }) => Number.isFinite(rank))
+      .sort((a, b) =>
+        a.rank - b.rank ||
+        (a.item.name || "").localeCompare(b.item.name || "")
+      )
+      .map(({ item }) => item);
+  }
+
+  const { items, truncated, total } = truncateList(results, max);
+  const lines = [];
+  if (query) {
+    lines.push(`## Committees matching "${query}" (${results.length} found)`);
+  } else {
+    lines.push(`## Apache Committees (${results.length} total)`);
+  }
+  lines.push("");
+
+  for (const c of items) {
+    lines.push(
+      `- **${c.name}** (${c.id}) [${c.type}] — ${c.shortdesc || "no description"}`
+    );
+    lines.push(`  Chair: ${c.chair} | Est: ${c.established} | ${c.homepage || ""}`);
+  }
+
+  if (truncated) {
+    lines.push(`\n... showing ${max} of ${total} results. Use a query to narrow down.`);
+  }
+
+  return makeResponse(lines.join("\n"), {
+    query: query || null,
+    count: results.length,
+    shown: items.length,
+    truncated: !!truncated,
+    committees: items.map((c) => ({
+      id: c.id,
+      name: c.name,
+      shortdesc: c.shortdesc || null,
+      chair: c.chair || null,
+      established: c.established || null,
+      homepage: c.homepage || null,
+    })),
+  });
+}
+
+function makeCommitteeResponse({ id, committees, podlings, ldapProjectsData = {}, names = {} }) {
+  const c = committees.find(
+    (x) => x.id === id.toLowerCase() || x.group === id.toLowerCase()
+  );
+
+  if (!c) {
+    const key = id.toLowerCase();
+    const podlingEntry = Object.entries(podlings).find(
+      ([podlingId, p]) =>
+        podlingId.toLowerCase() === key ||
+        (p.name || "").toLowerCase() === key
+    );
+    if (podlingEntry) {
+      const [podlingId, p] = podlingEntry;
+      const ldapProjects = getLdapProjects(ldapProjectsData);
+      const owners = formatMembers(ldapProjects[podlingId]?.owners, names);
+      const lines = [];
+      lines.push(`# ${p.name || podlingId}`);
+      lines.push(`ID: ${podlingId}`);
+      lines.push("Type: Podling");
+      lines.push(`Started: ${p.started || "unknown"}`);
+      lines.push(`Homepage: ${p.homepage || "N/A"}`);
+      lines.push(`Short description: ${p.description || "N/A"}`);
+      lines.push("");
+      lines.push(`## PPMC Roster (${owners.length} members)`);
+      for (const member of owners) {
+        lines.push(`- ${member.name} (${member.uid})`);
+      }
+
+      return makeTextResponse(lines.join("\n"));
+    }
+
+    return makeResponse(`Committee "${id}" not found.`, {
+      id: key,
+      found: false,
+      committee: null,
+    });
+  }
+
+  const lines = [];
+  lines.push(`# ${c.name}`);
+  lines.push(`ID: ${c.id}`);
+  lines.push(`Chair: ${c.chair}`);
+  lines.push(`Established: ${c.established}`);
+  lines.push(`Homepage: ${c.homepage || "N/A"}`);
+  lines.push(`Reporting cycle: ${c.reporting || "N/A"}`);
+  lines.push(`Short description: ${c.shortdesc || "N/A"}`);
+  lines.push("");
+  lines.push("## Charter");
+  lines.push(c.charter || "No charter available.");
+  lines.push("");
+
+  let roster = [];
+  if (c.roster) {
+    const members = Object.entries(c.roster);
+    members.sort((a, b) => a[1].name.localeCompare(b[1].name));
+    roster = members.map(([uid, info]) => ({
+      id: uid,
+      name: info.name || uid,
+      joined: info.date || null,
+    }));
+
+    lines.push(`## PMC Roster (${members.length} members)`);
+    for (const member of roster) {
+      lines.push(`- ${member.name} (${member.id}) — joined ${member.joined || "unknown"}`);
+    }
+  }
+
+  return makeResponse(lines.join("\n"), {
+    id: c.id,
+    name: c.name,
+    group: c.group || null,
+    chair: c.chair || null,
+    established: c.established || null,
+    homepage: c.homepage || null,
+    reporting: c.reporting || null,
+    shortdesc: c.shortdesc || null,
+    charter: c.charter || null,
+    roster,
+  });
+}
+
+function makeGroupMembersResponse({ group, groups, ldapProjectsData, names }) {
+  const ldapProjects = getLdapProjects(ldapProjectsData);
+  const key = group.toLowerCase();
+
+  const isOwnerRequest = isPmcGroupName(key);
+  const projectKey = isOwnerRequest ? getPmcGroupBase(key) : key;
+  const ldapProject = ldapProjects[projectKey];
+  const members = ldapProject
+    ? (isOwnerRequest ? ldapProject.owners : ldapProject.members)
+    : groups[key];
+  const resolvedKey = ldapProject ? projectKey : key;
+
+  if (!members) {
+    const matches = [
+      ...new Set([
+        ...Object.keys(ldapProjects).filter((k) => k.includes(projectKey)),
+        ...Object.keys(groups).filter((k) => k.includes(key)),
+      ]),
+    ];
+    if (matches.length > 0) {
+      const suggestions = matches.slice(0, 10);
+      return makeResponse(
+        `Group "${group}" not found. Similar groups: ${suggestions.join(", ")}`,
+        {
+          group: key,
+          count: 0,
+          members: [],
+          suggestions,
+        }
+      );
+    }
+    return makeResponse(`Group "${group}" not found.`, {
+      group: key,
+      count: 0,
+      members: [],
+      suggestions: [],
+    });
+  }
+
+  const lines = [];
+  lines.push(`## Group: ${resolvedKey} (${members.length} members)`);
+  lines.push("");
+
+  const enriched = members.map((uid) => ({
+    uid,
+    name: names[uid] || uid,
+  }));
+  enriched.sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const m of enriched) {
+    lines.push(`- ${m.name} (${m.uid})`);
+  }
+
+  return makeResponse(lines.join("\n"), {
+    group: key,
+    count: enriched.length,
+    members: enriched.map((m) => ({
+      id: m.uid,
+      name: m.name,
+    })),
+  });
+}
+
+function makeProjectOverviewResponse({ id, committees, podlings, groups, ldapProjectsData = {}, repos, releases }) {
+  const target = findProjectOverviewTarget(committees, podlings, id);
+  if (!target) {
+    const suggestions = findProjectSuggestions(committees, podlings, id);
+    return makeResponse(formatProjectNotFound(id, committees, podlings), {
+      query: id,
+      found: false,
+      suggestions,
+    });
+  }
+
+  const { pmcGroupName, committerGroupName } = getProjectGroups(target);
+  const ldapProject = getLdapProjects(ldapProjectsData)[target.groupBase];
+  const pmcMembers = ldapProject?.owners || groups[pmcGroupName];
+  const committers = ldapProject?.members || groups[committerGroupName];
+  const repoMatches = Object.entries(repos)
+    .filter(([name]) => matchesProjectRepository(name, target))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const recentReleases = getRecentReleases(releases, target.id);
+  const description = cleanText(target.description) || null;
+  const repositories = repoMatches.map(([name, url]) => ({ name, url }));
+
+  const lines = [];
+  lines.push(`# ${target.name}`);
+  lines.push("");
+  lines.push(`- **Canonical ID:** ${target.id}`);
+  lines.push(`- **Type:** ${target.type}`);
+  lines.push(`- **Short description:** ${description || "N/A"}`);
+  lines.push(`- **Homepage:** ${target.homepage || "N/A"}`);
+  lines.push(`- **Chair:** ${target.chair || "N/A"}`);
+  lines.push(`- **PMC group name:** ${pmcGroupName}`);
+  lines.push(`- **PMC member count:** ${pmcMembers ? pmcMembers.length : "N/A"}`);
+  lines.push(`- **Committer group name:** ${committerGroupName}`);
+  lines.push(`- **Committer count:** ${committers ? committers.length : "N/A"}`);
+  lines.push("");
+  lines.push(`## Repositories (${repositories.length})`);
+  if (repositories.length === 0) {
+    lines.push("No repositories found.");
+  } else {
+    for (const repo of repositories) {
+      lines.push(`- **${repo.name}**: ${repo.url}`);
+    }
+  }
+  lines.push("");
+  lines.push(`## Recent Releases (${recentReleases.length})`);
+  if (recentReleases.length === 0) {
+    lines.push("No releases found.");
+  } else {
+    for (const release of recentReleases) {
+      lines.push(`- **${release.name}** — ${release.date}`);
+    }
+  }
+
+  return makeResponse(lines.join("\n"), {
+    query: id,
+    found: true,
+    id: target.id,
+    name: target.name,
+    type: target.type,
+    description,
+    homepage: target.homepage || null,
+    chair: target.chair || null,
+    pmcGroupName,
+    pmcMemberCount: pmcMembers ? pmcMembers.length : null,
+    committerGroupName,
+    committerCount: committers ? committers.length : null,
+    repositories,
+    recentReleases,
+  });
+}
+
+function getDataStatus({
+  now = Date.now(),
+  sources = DATA_SOURCES,
+  dataCache = cache,
+  statusCache = cacheStatus,
+  cacheTtl = CACHE_TTL,
+} = {}) {
+  const lines = [];
+  const sourceStatuses = [];
+  lines.push("# Data Status");
+  lines.push("");
+  lines.push(`Cache TTL: ${formatAge(now - cacheTtl, now)}`);
+  lines.push("");
+
+  for (const key of Object.keys(sources)) {
+    const cached = dataCache[key];
+    const status = statusCache[key] || {};
+    const hasCachedData = Boolean(cached);
+    const cacheAge = hasCachedData ? formatAge(cached.ts, now) : "n/a";
+    const stale = hasCachedData ? (now - cached.ts) >= cacheTtl : true;
+    const lastRefresh = status.lastSuccess || (cached && cached.ts);
+    const lastResult = status.lastError ? "failure" : status.lastSuccess ? "success" : "not fetched";
+
+    lines.push(`- **${key}**`);
+    lines.push(`  URL: ${sources[key]}`);
+    lines.push(`  Cached: ${hasCachedData ? "yes" : "no"} | Age: ${cacheAge} | Stale: ${stale ? "yes" : "no"}`);
+    lines.push(`  Last attempt: ${formatTimestamp(status.lastAttempt)}`);
+    lines.push(`  Last refresh: ${formatTimestamp(lastRefresh)} | Last result: ${lastResult}`);
+    if (status.lastFailure) {
+      lines.push(`  Last failure: ${formatTimestamp(status.lastFailure)}`);
+    }
+    if (status.lastError) {
+      lines.push(`  Error: ${status.lastError}`);
+    }
+
+    sourceStatuses.push({
+      key,
+      url: sources[key],
+      cached: hasCachedData,
+      age: cacheAge,
+      stale,
+      lastAttempt: status.lastAttempt || null,
+      lastRefresh: lastRefresh || null,
+      lastResult,
+      lastFailure: status.lastFailure || null,
+      error: status.lastError || null,
+    });
+  }
+
+  return makeResponse(lines.join("\n"), {
+    cacheTtl,
+    cacheTtlAge: formatAge(now - cacheTtl, now),
+    sources: sourceStatuses,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +972,7 @@ const server = new McpServer({
 // --- Tool: list_committees --------------------------------------------------
 server.tool(
   "list_committees",
-  "List Apache project committees (PMCs). Optionally filter by name or keyword. " +
+  "List Apache project committees (PMCs) and podlings. Optionally filter by name or keyword. " +
     "Returns committee ID, name, short description, chair, and established date.",
   {
     query: z.string().optional().describe(
@@ -145,60 +982,8 @@ server.tool(
   },
   async ({ query, limit }) => {
     const committees = await getData("committees");
-    const max = limit || 50;
-
-    let results = committees;
-    if (query) {
-      results = committees
-        .map((c) => ({
-          committee: c,
-          rank: bestSearchRank(
-            [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
-            query
-          ),
-        }))
-        .filter(({ rank }) => Number.isFinite(rank))
-        .sort((a, b) =>
-          a.rank - b.rank ||
-          (a.committee.name || "").localeCompare(b.committee.name || "")
-        )
-        .map(({ committee }) => committee);
-    }
-
-    const { items, truncated, total } = truncateList(results, max);
-    const lines = [];
-    if (query) {
-      lines.push(`## Committees matching "${query}" (${results.length} found)`);
-    } else {
-      lines.push(`## Apache Committees (${committees.length} total)`);
-    }
-    lines.push("");
-
-    for (const c of items) {
-      lines.push(
-        `- **${c.name}** (${c.id}) — ${c.shortdesc || "no description"}`
-      );
-      lines.push(`  Chair: ${c.chair} | Est: ${c.established} | ${c.homepage || ""}`);
-    }
-
-    if (truncated) {
-      lines.push(`\n... showing ${max} of ${total} results. Use a query to narrow down.`);
-    }
-
-    return makeResponse(lines.join("\n"), {
-      query: query || null,
-      count: results.length,
-      shown: items.length,
-      truncated: !!truncated,
-      committees: items.map((c) => ({
-        id: c.id,
-        name: c.name,
-        shortdesc: c.shortdesc || null,
-        chair: c.chair || null,
-        established: c.established || null,
-        homepage: c.homepage || null,
-      })),
-    });
+    const podlings = await getData("podlings");
+    return makeListCommitteesResponse({ committees, podlings, query, limit });
   }
 );
 
@@ -214,59 +999,61 @@ server.tool(
   },
   async ({ id }) => {
     const committees = await getData("committees");
-    const c = committees.find(
-      (x) => x.id === id.toLowerCase() || x.group === id.toLowerCase()
+    const podlings = await getData("podlings");
+    const key = id.toLowerCase();
+    const c = committees.find((x) => x.id === key || x.group === key);
+    const podlingEntry = c ? null : Object.entries(podlings).find(
+      ([podlingId, p]) =>
+        podlingId.toLowerCase() === key ||
+        (p.name || "").toLowerCase() === key
     );
+    const ldapProjectsData = podlingEntry ? await getData("ldap_projects") : {};
+    const names = podlingEntry ? await getData("people_name") : {};
 
-    if (!c) {
-      return makeResponse(`Committee "${id}" not found.`, {
-        id: id.toLowerCase(),
-        found: false,
-        committee: null,
-      });
-    }
+    return makeCommitteeResponse({ id, committees, podlings, ldapProjectsData, names });
+  }
+);
 
-    const lines = [];
-    lines.push(`# ${c.name}`);
-    lines.push(`ID: ${c.id}`);
-    lines.push(`Chair: ${c.chair}`);
-    lines.push(`Established: ${c.established}`);
-    lines.push(`Homepage: ${c.homepage || "N/A"}`);
-    lines.push(`Reporting cycle: ${c.reporting || "N/A"}`);
-    lines.push(`Short description: ${c.shortdesc || "N/A"}`);
-    lines.push("");
-    lines.push("## Charter");
-    lines.push(c.charter || "No charter available.");
-    lines.push("");
+// --- Tool: get_project_overview --------------------------------------------
+server.tool(
+  "get_project_overview",
+  "Get the important ASF information about a project in one summary: identity, " +
+    "homepage, chair, group names and counts, repositories, and recent releases.",
+  {
+    id: z.string().describe(
+      "Project ID (e.g. 'iceberg', 'httpd', 'spark')"
+    ),
+  },
+  async ({ id }) => {
+    const committees = await getData("committees");
+    const podlings = await getData("podlings");
+    const groups = await getData("groups");
+    const ldapProjectsData = await getData("ldap_projects");
+    const repos = await getData("repositories");
+    const releases = await getData("releases");
 
-    let roster = [];
-    if (c.roster) {
-      const members = Object.entries(c.roster);
-      members.sort((a, b) => a[1].name.localeCompare(b[1].name));
-      roster = members.map(([uid, info]) => ({
-        id: uid,
-        name: info.name || uid,
-        joined: info.date || null,
-      }));
+    return makeProjectOverviewResponse({ id, committees, podlings, groups, ldapProjectsData, repos, releases });
+  }
+);
 
-      lines.push(`## PMC Roster (${members.length} members)`);
-      for (const member of roster) {
-        lines.push(`- ${member.name} (${member.id}) — joined ${member.joined || "unknown"}`);
-      }
-    }
+// --- Tool: get_project_people ----------------------------------------------
+server.tool(
+  "get_project_people",
+  "Get the people involved in an Apache project: PMC members, committers, " +
+    "and counts for each group.",
+  {
+    id: z.string().describe(
+      "Project ID (e.g. 'iceberg', 'httpd', 'spark')"
+    ),
+  },
+  async ({ id }) => {
+    const committees = await getData("committees");
+    const podlings = await getData("podlings");
+    const groups = await getData("groups");
+    const ldapProjectsData = await getData("ldap_projects");
+    const names = await getData("people_name");
 
-    return makeResponse(lines.join("\n"), {
-      id: c.id,
-      name: c.name,
-      group: c.group || null,
-      chair: c.chair || null,
-      established: c.established || null,
-      homepage: c.homepage || null,
-      reporting: c.reporting || null,
-      shortdesc: c.shortdesc || null,
-      charter: c.charter || null,
-      roster,
-    });
+    return makeProjectPeopleResponse({ id, committees, podlings, groups, ldapProjectsData, names });
   }
 );
 
@@ -285,43 +1072,22 @@ server.tool(
     const people = await getData("people");
     const names = await getData("people_name");
     const max = limit || 20;
-    const matches = [];
-    for (const [uid, info] of Object.entries(people)) {
-      const name = names[uid] || info.name || "";
-      const rank = bestSearchRank([uid, name], query);
-      if (Number.isFinite(rank)) {
-        matches.push({ ...info, uid, name, rank });
-      }
-    }
-    matches.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-
-    const { items, truncated, total } = truncateList(matches, max);
+    const result = searchPeople(people, names, query, max);
     const lines = [];
-    lines.push(`## People matching "${query}" (${matches.length} found)`);
+    lines.push(`## People matching "${query}" (${result.count} found)`);
     lines.push("");
 
-    for (const p of items) {
+    for (const p of result.people) {
       const memberStr = p.member ? " [ASF Member]" : "";
-      lines.push(`- **${p.name}** (${p.uid})${memberStr}`);
+      lines.push(`- **${p.name}** (${p.id})${memberStr}`);
       lines.push(`  Groups: ${(p.groups || []).join(", ")}`);
     }
 
-    if (truncated) {
-      lines.push(`\n... showing ${max} of ${total} results.`);
+    if (result.truncated) {
+      lines.push(`\n... showing ${max} of ${result.count} results.`);
     }
 
-    return makeResponse(lines.join("\n"), {
-      query,
-      count: matches.length,
-      shown: items.length,
-      truncated: !!truncated,
-      people: items.map((p) => ({
-        id: p.uid,
-        name: p.name,
-        member: !!p.member,
-        groups: p.groups || [],
-      })),
-    });
+    return makeResponse(lines.join("\n"), result);
   }
 );
 
@@ -349,9 +1115,9 @@ server.tool(
 
     const name = names[uid] || person.name || uid;
     const groups = person.groups || [];
-    const pmcGroups = groups.filter((g) => g.endsWith("-pmc"));
-    const committerGroups = groups.filter((g) => !g.endsWith("-pmc"));
-    const pmcs = pmcGroups.map((g) => g.replace("-pmc", ""));
+    const pmcGroups = groups.filter(isPmcGroupName);
+    const committerGroups = groups.filter((g) => !isPmcGroupName(g));
+    const pmcs = pmcGroups.map(getPmcGroupBase);
 
     const lines = [];
     lines.push(`# ${name} (${uid})`);
@@ -371,6 +1137,33 @@ server.tool(
       committerGroups,
       pmcGroups,
       pmcs,
+    });
+  }
+);
+
+// --- Tool: find_projects_by_person -----------------------------------------
+server.tool(
+  "find_projects_by_person",
+  "Find where an ASF person is involved across projects. Returns PMC " +
+    "memberships and committer groups, grouped clearly by role.",
+  {
+    id: z.string().describe("Apache ID (e.g. 'rbowen', 'jmclean')"),
+  },
+  async ({ id }) => {
+    const committees = await getData("committees");
+    const podlings = await getData("podlings");
+    const groups = await getData("groups");
+    const ldapProjectsData = await getData("ldap_projects");
+    const people = await getData("people");
+    const names = await getData("people_name");
+    return makeFindProjectsByPersonResponse({
+      id,
+      committees,
+      podlings,
+      groups,
+      ldapProjectsData,
+      people,
+      names,
     });
   }
 );
@@ -501,55 +1294,9 @@ server.tool(
   },
   async ({ group }) => {
     const groups = await getData("groups");
+    const ldapProjectsData = await getData("ldap_projects");
     const names = await getData("people_name");
-    const key = group.toLowerCase();
-
-    const members = groups[key];
-    if (!members) {
-      // Try to suggest
-      const matches = Object.keys(groups).filter((k) => k.includes(key));
-      if (matches.length > 0) {
-        const suggestions = matches.slice(0, 10);
-        return makeResponse(
-          `Group "${group}" not found. Similar groups: ${suggestions.join(", ")}`,
-          {
-            group: key,
-            count: 0,
-            members: [],
-            suggestions,
-          }
-        );
-      }
-      return makeResponse(`Group "${group}" not found.`, {
-        group: key,
-        count: 0,
-        members: [],
-        suggestions: [],
-      });
-    }
-
-    const lines = [];
-    lines.push(`## Group: ${key} (${members.length} members)`);
-    lines.push("");
-
-    const enriched = members.map((uid) => ({
-      uid,
-      name: names[uid] || uid,
-    }));
-    enriched.sort((a, b) => a.name.localeCompare(b.name));
-
-    for (const m of enriched) {
-      lines.push(`- ${m.name} (${m.uid})`);
-    }
-
-    return makeResponse(lines.join("\n"), {
-      group: key,
-      count: enriched.length,
-      members: enriched.map((m) => ({
-        id: m.uid,
-        name: m.name,
-      })),
-    });
+    return makeGroupMembersResponse({ group, groups, ldapProjectsData, names });
   }
 );
 
@@ -615,72 +1362,31 @@ server.tool(
     const max = limit || 30;
     const committees = await getData("committees");
     const podlings = await getData("podlings");
-
-    const results = [];
-
-    // Search committees
-    for (const c of committees) {
-      const rank = bestSearchRank(
-        [c.name || "", c.id || "", c.shortdesc || "", c.charter || ""],
-        query
-      );
-      if (Number.isFinite(rank)) {
-        results.push({
-          type: "TLP",
-          id: c.id,
-          name: c.name,
-          desc: c.shortdesc || "",
-          homepage: c.homepage || "",
-          rank,
-        });
-      }
-    }
-
-    // Search podlings
-    for (const [id, p] of Object.entries(podlings)) {
-      const rank = bestSearchRank([p.name || "", id, p.description || ""], query);
-      if (Number.isFinite(rank)) {
-        results.push({
-          type: "Podling",
-          id,
-          name: p.name,
-          desc: (p.description || "").replace(/\s+/g, " ").trim(),
-          homepage: p.homepage || "",
-          rank,
-        });
-      }
-    }
-    results.sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
-
-    const { items, truncated, total } = truncateList(results, max);
+    const result = searchProjects(committees, podlings, query, max);
     const lines = [];
-    lines.push(`## Projects matching "${query}" (${results.length} found)`);
+    lines.push(`## Projects matching "${query}" (${result.count} found)`);
     lines.push("");
 
-    for (const r of items) {
+    for (const r of result.projects) {
       lines.push(`- **${r.name}** (${r.id}) [${r.type}]`);
-      if (r.desc) lines.push(`  ${r.desc}`);
+      if (r.description) lines.push(`  ${r.description}`);
       if (r.homepage) lines.push(`  ${r.homepage}`);
     }
 
-    if (truncated) {
-      lines.push(`\n... showing ${max} of ${total}.`);
+    if (result.truncated) {
+      lines.push(`\n... showing ${max} of ${result.count}.`);
     }
 
-    return makeResponse(lines.join("\n"), {
-      query,
-      count: results.length,
-      shown: items.length,
-      truncated: !!truncated,
-      projects: items.map((r) => ({
-        type: r.type,
-        id: r.id,
-        name: r.name,
-        description: r.desc || null,
-        homepage: r.homepage || null,
-      })),
-    });
+    return makeResponse(lines.join("\n"), result);
   }
+);
+
+// --- Tool: get_data_status --------------------------------------------------
+server.tool(
+  "get_data_status",
+  "Show cache and upstream fetch status for each Apache project data source.",
+  {},
+  async () => getDataStatus()
 );
 
 // --- Tool: project_stats ----------------------------------------------------
@@ -744,4 +1450,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await server.connect(transport);
 }
 
-export { makeResponse, makeTextResponse, server };
+export {
+  makeCommitteeResponse,
+  makeGroupMembersResponse,
+  makeListCommitteesResponse,
+  getDataStatus,
+  makeFindProjectsByPersonResponse,
+  makeProjectOverviewResponse,
+  makeProjectPeopleResponse,
+  makeResponse,
+  makeTextResponse,
+  server,
+  searchPeople,
+  searchProjects,
+};
