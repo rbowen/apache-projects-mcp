@@ -250,6 +250,30 @@ test('makeListCommitteesResponse includes PMCs and podlings in structured conten
   });
 });
 
+test('makeListCommitteesResponse sorts equal-rank filtered results by name', () => {
+  const result = makeListCommitteesResponse({
+    committees: [
+      {
+        id: 'zeta',
+        name: 'Apache Zeta',
+        shortdesc: 'Shared search term',
+      },
+      {
+        id: 'alpha',
+        name: 'Apache Alpha',
+        shortdesc: 'Shared search term',
+      },
+    ],
+    podlings: {},
+    query: 'shared',
+  });
+
+  assert.deepStrictEqual(
+    result.structuredContent.committees.map((committee) => committee.id),
+    ['alpha', 'zeta']
+  );
+});
+
 test('makeCommitteeResponse returns committee roster structured content', () => {
   const result = makeCommitteeResponse({
     id: 'demo',
@@ -288,6 +312,37 @@ test('makeCommitteeResponse returns committee roster structured content', () => 
       { id: 'bob', name: 'Bob Example', joined: '2021-02-03' },
     ],
   });
+});
+
+test('makeCommitteeResponse returns podling PPMC roster text', () => {
+  const result = makeCommitteeResponse({
+    id: 'pod',
+    committees: [],
+    podlings: {
+      pod: {
+        name: 'Apache Pod',
+        description: 'Podling project',
+        started: '2026-01',
+        homepage: 'https://pod.apache.org/',
+      },
+    },
+    ldapProjectsData: {
+      projects: {
+        pod: {
+          owners: ['bob', 'alice'],
+        },
+      },
+    },
+    names: {
+      alice: 'Alice Example',
+      bob: 'Bob Example',
+    },
+  });
+
+  assert.match(result.content[0].text, /^# Apache Pod/);
+  assert.match(result.content[0].text, /## PPMC Roster \(2 members\)/);
+  assert.match(result.content[0].text, /- Alice Example \(alice\)/);
+  assert.ok(!('structuredContent' in result));
 });
 
 test('makeFindProjectsByPersonResponse returns structured project roles', () => {
@@ -360,6 +415,88 @@ test('makeFindProjectsByPersonResponse returns structured project roles', () => 
       },
     ],
   });
+});
+
+test('makeFindProjectsByPersonResponse includes LDAP podling roles and fallback groups', () => {
+  const result = makeFindProjectsByPersonResponse({
+    id: 'jdoe',
+    committees: [],
+    podlings: {
+      pod: {
+        name: 'Apache Pod',
+        homepage: 'https://pod.apache.org/',
+      },
+    },
+    groups: {
+      unknown: ['jdoe'],
+    },
+    ldapProjectsData: {
+      projects: {
+        pod: {
+          owners: ['jdoe'],
+          members: ['jdoe'],
+        },
+      },
+    },
+    people: {
+      jdoe: { member: false },
+    },
+    names: {
+      jdoe: 'Jane Doe',
+    },
+  });
+
+  assert.ok(result.content[0].text.includes('Apache Pod** (pod) [Podling] - group: pod-ppmc'));
+  assert.ok(result.content[0].text.includes('unknown** (unknown) [LDAP group] - group: unknown'));
+  assert.deepStrictEqual(result.structuredContent.pmcMemberships, [{
+    group: 'pod-ppmc',
+    project: {
+      type: 'podling',
+      id: 'pod',
+      name: 'Apache Pod',
+      homepage: 'https://pod.apache.org/',
+    },
+  }]);
+  assert.deepStrictEqual(result.structuredContent.committerGroups, [
+    {
+      group: 'pod',
+      project: {
+        type: 'podling',
+        id: 'pod',
+        name: 'Apache Pod',
+        homepage: 'https://pod.apache.org/',
+      },
+    },
+    {
+      group: 'unknown',
+      project: {
+        type: 'group',
+        id: 'unknown',
+        name: 'unknown',
+        homepage: null,
+      },
+    },
+  ]);
+});
+
+test('makeFindProjectsByPersonResponse reports empty roles for known people with no groups', () => {
+  const result = makeFindProjectsByPersonResponse({
+    id: 'lonely',
+    committees: [],
+    podlings: {},
+    groups: {},
+    people: {
+      lonely: { member: false },
+    },
+    names: {
+      lonely: 'Lonely Person',
+    },
+  });
+
+  assert.match(result.content[0].text, /## PMC Memberships \(0\)\nNone found\./);
+  assert.match(result.content[0].text, /## Committer Groups \(0\)\nNone found\./);
+  assert.strictEqual(result.structuredContent.pmcMembershipCount, 0);
+  assert.strictEqual(result.structuredContent.committerGroupCount, 0);
 });
 
 test('makeFindProjectsByPersonResponse returns structured suggestions when not found', () => {
@@ -1213,6 +1350,27 @@ test('list_podlings returns structured filtered podlings', withMockedFetch(async
   });
 }));
 
+test('list_podlings sorts filtered podlings by rank and name', withMockedFetch(async () => {
+  const result = await getToolHandler('list_podlings')({ query: 'demo' });
+
+  assert.deepStrictEqual(
+    result.structuredContent.podlings.map((podling) => podling.id),
+    ['alpha_demo', 'zeta_demo']
+  );
+}, {
+  ...SOURCE_FIXTURES,
+  podlings: {
+    zeta_demo: {
+      name: 'Zeta Demo',
+      description: 'Demo project',
+    },
+    alpha_demo: {
+      name: 'Alpha Demo',
+      description: 'Demo project',
+    },
+  },
+}));
+
 test('get_releases returns suggestions when a project is missing', withMockedFetch(async () => {
   const result = await getToolHandler('get_releases')({ project: 'del' });
 
@@ -1378,6 +1536,15 @@ test('get_project_people tool returns the same structured people summary as the 
   assert.strictEqual(result.structuredContent.name, 'Apache Demo');
   assert.strictEqual(result.structuredContent.pmcMembers.length, 2);
   assert.strictEqual(result.structuredContent.committers.length, 3);
+}));
+
+test('find_projects_by_person tool returns structured project involvement', withMockedFetch(async () => {
+  const result = await getToolHandler('find_projects_by_person')({ id: 'alice' });
+
+  assert.match(result.content[0].text, /^# Project involvement for Alice Example \(alice\)/);
+  assert.strictEqual(result.structuredContent.id, 'alice');
+  assert.strictEqual(result.structuredContent.pmcMembershipCount, 1);
+  assert.strictEqual(result.structuredContent.committerGroupCount, 1);
 }));
 
 test('get_data_status tool returns the structured cache status view', withMockedFetch(async () => {
